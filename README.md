@@ -135,3 +135,36 @@ This will generate a signed MSI file for the CyberSentinel Agent.
 ## Output
 
 Upon successful completion, you will have a signed `cybersentinel-agent.msi` installer ready for deployment.
+
+## Deployment
+
+### 1. Create a Release
+
+- Upload the signed `cybersentinel-agent.msi` to your GitHub repository releases
+- Include the certificate file (`ca.cer`) in the release assets
+
+### 2. Client Installation
+
+On the client device, run the following command in **PowerShell as Administrator**:
+```powershell
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-Files/main/ca.cer -OutFile "$env:TEMP\ca.cer"; Import-Certificate -FilePath "$env:TEMP\ca.cer" -CertStoreLocation Cert:\LocalMachine\Root; Invoke-WebRequest -Uri https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent-1.0.0.msi -OutFile "$env:TEMP\cybersentinel-agent.msi"; msiexec.exe /i "$env:TEMP\cybersentinel-agent.msi" /q WAZUH_MANAGER="{Your_IP}" WAZUH_AGENT_GROUP="windows" WAZUH_AGENT_NAME="{Client_Agent_Name}"
+```
+
+**Parameters to customize:**
+- `{Your_IP}` - Replace with your CyberSentinel Manager server IP address
+- `{Client_Agent_Name}` - Replace with a unique name for the client agent
+
+This command will:
+1. Download and install the CA certificate
+2. Download the CyberSentinel Agent MSI
+3. Silently install the agent with the specified manager and agent configuration
+
+---
+
+## Support
+
+For issues or questions, please open an issue in this repository.
+
+## License
+
+See `license.rtf` for license information.
