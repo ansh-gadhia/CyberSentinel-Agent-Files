@@ -62,7 +62,7 @@ try {
     # This is needed to access the PRIVATE config files repository
     # Generate token at: https://github.com/settings/tokens (needs 'repo' scope)
     
-    $githubToken = "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"
+    $githubToken = "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"
     
     if ($githubToken -eq "YOUR_GITHUB_TOKEN_HERE" -or [string]::IsNullOrWhiteSpace($githubToken)) {
         Write-Host "ERROR: GitHub token not configured!" -ForegroundColor Red
@@ -276,3 +276,4 @@ catch {
 }
 
 Read-Host "Press Enter to exit"
+
