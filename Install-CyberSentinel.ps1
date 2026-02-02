@@ -56,60 +56,48 @@ try {
     }
 
     # ================================
-    # STEP 2: GITHUB TOKEN CONFIG
+    # STEP 2: GITHUB TOKEN CONFIG (for private repo)
     # ================================
     # IMPORTANT: Replace this with your valid GitHub Personal Access Token
-    # Generate one at: https://github.com/settings/tokens
-    # Required scope: 'repo' (Full control of private repositories)
+    # This is needed to access the PRIVATE config files repository
+    # Generate token at: https://github.com/settings/tokens (needs 'repo' scope)
     
     $githubToken = "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"
     
-    # Alternatively, use environment variable:
-    # $githubToken = $env:GITHUB_TOKEN
-    
     if ($githubToken -eq "YOUR_GITHUB_TOKEN_HERE" -or [string]::IsNullOrWhiteSpace($githubToken)) {
         Write-Host "ERROR: GitHub token not configured!" -ForegroundColor Red
-        Write-Host "Please edit the script and replace 'YOUR_GITHUB_TOKEN_HERE' with your actual token." -ForegroundColor Yellow
+        Write-Host "This token is required to access private configuration files." -ForegroundColor Yellow
+        Write-Host "Please edit the script and replace 'YOUR_GITHUB_TOKEN_HERE' with your token." -ForegroundColor Yellow
         Write-Host "Generate a token at: https://github.com/settings/tokens" -ForegroundColor Cyan
         Read-Host "Press Enter to exit"
         exit 1
     }
 
-    # ================================
-    # GITHUB REPOSITORY CONFIG
-    # ================================
-    # UPDATE THESE if your repository or file paths are different
-    $repoOwner = "cybersentinel-06"
-    $repoName  = "CyberSentinel-SIEM"
-    
-    # UPDATE THESE file paths if they're located elsewhere in your repo
-    $configFilePaths = @{
-        ossecConf  = "AGENTS/WINDOWS-AGENT/ossec.conf"
-        enrichScript = "AGENTS/WINDOWS-AGENT/enrich.ps1"
-        sysmonScript = "AGENTS/WINDOWS-AGENT/sysmon.ps1"
-    }
-
+    # GitHub API headers for private repo access
     $headers = @{
         Authorization = "Bearer $githubToken"
         "User-Agent"  = "CyberSentinel-Agent-Installer"
         Accept        = "application/vnd.github+json"
     }
 
+    # Private repo configuration
+    $privateRepoOwner = "cybersentinel-06"
+    $privateRepoName  = "CyberSentinel-SIEM"
+
     # ================================
     # STEP 3: VALIDATE GITHUB ACCESS
     # ================================
     Write-Host ""
-    Write-Host "[1/8] Validating GitHub access..." -ForegroundColor Green
+    Write-Host "[1/8] Validating GitHub access to private repository..." -ForegroundColor Green
 
     $filesToValidate = @(
-        $configFilePaths.ossecConf,
-        $configFilePaths.enrichScript,
-        $configFilePaths.sysmonScript
+        "AGENTS/WINDOWS-AGENT/ossec.conf",
+        "AGENTS/WINDOWS-AGENT/enrich.ps1",
+        "AGENTS/WINDOWS-AGENT/sysmon.ps1"
     )
 
     foreach ($file in $filesToValidate) {
-        $validationUrl = "https://api.github.com/repos/$repoOwner/$repoName/contents/$file"
-        Write-Host "  → Testing: $validationUrl" -ForegroundColor Cyan
+        $validationUrl = "https://api.github.com/repos/$privateRepoOwner/$privateRepoName/contents/$file"
         
         try {
             $response = Invoke-WebRequest -Uri $validationUrl -Headers $headers -Method GET -UseBasicParsing
@@ -117,22 +105,21 @@ try {
         } catch {
             Write-Host "  ✗ Failed to access: $file" -ForegroundColor Red
             Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host "  URL: $validationUrl" -ForegroundColor Yellow
             Write-Host ""
-            Write-Host "Please verify:" -ForegroundColor Yellow
-            Write-Host "  1. Repository exists: https://github.com/$repoOwner/$repoName" -ForegroundColor White
-            Write-Host "  2. File path is correct: $file" -ForegroundColor White
-            Write-Host "  3. GitHub token has 'repo' scope access" -ForegroundColor White
-            Write-Host "  4. Token belongs to an account with access to the repository" -ForegroundColor White
+            Write-Host "Troubleshooting:" -ForegroundColor Yellow
+            Write-Host "  1. Verify repository exists: https://github.com/$privateRepoOwner/$privateRepoName" -ForegroundColor White
+            Write-Host "  2. Check file path: $file" -ForegroundColor White
+            Write-Host "  3. Ensure token has 'repo' scope" -ForegroundColor White
+            Write-Host "  4. Verify token owner has repository access" -ForegroundColor White
             Read-Host "Press Enter to exit"
             exit 1
         }
     }
 
-    Write-Host "  ✓ GitHub access validated successfully" -ForegroundColor Green
+    Write-Host "  ✓ Private repository access validated successfully" -ForegroundColor Green
 
     # ================================
-    # STEP 4: DOWNLOAD CA CERTIFICATE
+    # STEP 4: DOWNLOAD CA CERTIFICATE (public repo)
     # ================================
     Write-Host ""
     Write-Host "[2/8] Downloading CA certificate..." -ForegroundColor Green
@@ -151,7 +138,7 @@ try {
     Write-Host "  ✓ CA certificate imported successfully" -ForegroundColor Green
 
     # ================================
-    # STEP 6: DOWNLOAD INSTALLER
+    # STEP 6: DOWNLOAD INSTALLER (public repo)
     # ================================
     Write-Host ""
     Write-Host "[4/8] Downloading CyberSentinel agent installer..." -ForegroundColor Green
@@ -196,10 +183,10 @@ try {
     Write-Host "  ✓ Environment configured successfully" -ForegroundColor Green
 
     # ================================
-    # STEP 9: DOWNLOAD FILES (GITHUB API)
+    # STEP 9: DOWNLOAD SECRET CONFIG FILES (private repo with token)
     # ================================
     Write-Host ""
-    Write-Host "[7/8] Fetching CyberSentinel configuration files..." -ForegroundColor Green
+    Write-Host "[7/8] Fetching secret configuration files from private repository..." -ForegroundColor Green
 
     function Download-GitHubFile {
         param (
@@ -207,7 +194,7 @@ try {
             [string]$Destination
         )
 
-        $apiUrl = "https://api.github.com/repos/$repoOwner/$repoName/contents/$RepoPath"
+        $apiUrl = "https://api.github.com/repos/$privateRepoOwner/$privateRepoName/contents/$RepoPath"
         $response = Invoke-RestMethod -Uri $apiUrl -Headers $headers -Method GET
         $content  = [System.Text.Encoding]::UTF8.GetString(
                         [System.Convert]::FromBase64String($response.content)
@@ -216,14 +203,16 @@ try {
     }
 
     # Download ossec.conf
+    Write-Host "  → Downloading ossec.conf..." -ForegroundColor Cyan
     Download-GitHubFile `
-        -RepoPath $configFilePaths.ossecConf `
+        -RepoPath "AGENTS/WINDOWS-AGENT/ossec.conf" `
         -Destination $ossecConfPath
 
     # Download and execute enrich.ps1
     $enrichScriptPath = Join-Path $ossecDir "enrich.ps1"
+    Write-Host "  → Downloading enrich.ps1..." -ForegroundColor Cyan
     Download-GitHubFile `
-        -RepoPath $configFilePaths.enrichScript `
+        -RepoPath "AGENTS/WINDOWS-AGENT/enrich.ps1" `
         -Destination $enrichScriptPath
 
     Write-Host "  → Executing enrich.ps1..." -ForegroundColor Cyan
@@ -231,14 +220,15 @@ try {
 
     # Download and execute sysmon.ps1
     $sysmonScriptPath = Join-Path $ossecDir "sysmon.ps1"
+    Write-Host "  → Downloading sysmon.ps1..." -ForegroundColor Cyan
     Download-GitHubFile `
-        -RepoPath $configFilePaths.sysmonScript `
+        -RepoPath "AGENTS/WINDOWS-AGENT/sysmon.ps1" `
         -Destination $sysmonScriptPath
 
     Write-Host "  → Executing sysmon.ps1..." -ForegroundColor Cyan
     powershell -ExecutionPolicy Bypass -File $sysmonScriptPath
 
-    Write-Host "  ✓ Configuration files downloaded and executed successfully" -ForegroundColor Green
+    Write-Host "  ✓ Secret configuration files downloaded and executed successfully" -ForegroundColor Green
 
     # ================================
     # STEP 10: START SERVICE
