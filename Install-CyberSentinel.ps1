@@ -85,7 +85,7 @@ try {
 }
 
 Write-Host ""
-Write-Host "[4/4] Installing CyberSentinel agent..." -ForegroundColor Green
+Write-Host "[4/5] Installing CyberSentinel agent..." -ForegroundColor Green
 
 try {
     $msiArgs = "/i `"$installerPath`" /q WAZUH_MANAGER=`"$managerIP`" WAZUH_AGENT_GROUP=`"windows`" WAZUH_AGENT_NAME=`"$agentName`""
@@ -113,6 +113,18 @@ Write-Host "Cleaning up temporary files..." -ForegroundColor Yellow
 Remove-Item -Path $caCertPath -Force -ErrorAction SilentlyContinue
 Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
 
+Write-Host ""
+Write-Host "[5/5] Starting CyberSentinel service..." -ForegroundColor Green
+
+try {
+    NET START CyberSentinelSvc
+    Write-Host "  ✓ CyberSentinel service started successfully" -ForegroundColor Green
+} catch {
+    Write-Host "  ✗ Failed to start service: $_" -ForegroundColor Red
+    Write-Host "  You may need to start it manually using: NET START CyberSentinelSvc" -ForegroundColor Yellow
+}
+
+Write-Host ""
 Write-Host "Done!" -ForegroundColor Green
 Write-Host ""
 Read-Host "Press Enter to exit"
