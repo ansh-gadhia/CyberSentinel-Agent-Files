@@ -28,7 +28,7 @@ try {
     Write-Host ""
 
     # ================================
-    # STEP 1: USER INPUT
+    # STEP 1: ASK FOR MANAGER IP AND AGENT NAME
     # ================================
     $managerIP = Read-Host "Enter the CyberSentinel Manager IP address"
 
@@ -54,50 +54,35 @@ try {
     Write-Host "  Agent Name: $agentName" -ForegroundColor White
     Write-Host ""
 
-    $confirm = Read-Host "Proceed with installation? (Y/N)"
-    if ($confirm -ne 'Y' -and $confirm -ne 'y') {
-        Write-Host "Installation cancelled by user." -ForegroundColor Yellow
-        exit 0
-    }
-
     # ================================
-    # STEP 2: GITHUB TOKEN CONFIG (for private repo)
+    # STEP 2: VERIFY TOKEN
     # ================================
-    # Check if token was provided as parameter
     if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
-        Write-Host ""
         Write-Host "ERROR: GitHub token not provided!" -ForegroundColor Red
         Write-Host ""
-        Write-Host "Please run the script with the -GitHubToken parameter:" -ForegroundColor Yellow
-        Write-Host "  irm https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-Files/main/Install-CyberSentinel.ps1 | iex -ArgumentList 'YOUR_TOKEN_HERE'" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "Or use the full command:" -ForegroundColor Yellow
-        Write-Host "  `$token='YOUR_TOKEN'; irm URL | iex" -ForegroundColor Cyan
+        Write-Host "Usage:" -ForegroundColor Yellow
+        Write-Host '  iex "& { $(irm https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-Files/main/Install-CyberSentinel.ps1) } -GitHubToken ''YOUR_TOKEN''"' -ForegroundColor Cyan
         Write-Host ""
         Write-Host "Generate a token at: https://github.com/settings/tokens (needs 'repo' scope)" -ForegroundColor White
         Read-Host "Press Enter to exit"
         exit 1
     }
 
-    # Use the provided token
-    $githubToken = $GitHubToken
-
-    # GitHub API headers for private repo access
-    $headers = @{
-        Authorization = "Bearer $githubToken"
-        "User-Agent"  = "CyberSentinel-Agent-Installer"
-        Accept        = "application/vnd.github+json"
-    }
-
     # Private repo configuration
     $privateRepoOwner = "cybersentinel-06"
     $privateRepoName  = "CyberSentinel-SIEM"
 
+    # GitHub API headers
+    $headers = @{
+        Authorization = "Bearer $GitHubToken"
+        "User-Agent"  = "CyberSentinel-Agent-Installer"
+        Accept        = "application/vnd.github+json"
+    }
+
     # ================================
-    # STEP 3: VALIDATE GITHUB ACCESS
+    # STEP 3: VALIDATE ACCESS
     # ================================
-    Write-Host ""
-    Write-Host "[1/8] Validating GitHub access to private repository..." -ForegroundColor Green
+    Write-Host "[1/6] Validating GitHub access to private repository..." -ForegroundColor Green
 
     $filesToValidate = @(
         "AGENTS/WINDOWS-AGENT/ossec.conf",
@@ -109,95 +94,72 @@ try {
         $validationUrl = "https://api.github.com/repos/$privateRepoOwner/$privateRepoName/contents/$file"
         
         try {
-            $response = Invoke-WebRequest -Uri $validationUrl -Headers $headers -Method GET -UseBasicParsing
-            Write-Host "  ✓ Access verified for: $file" -ForegroundColor Green
+            Invoke-WebRequest -Uri $validationUrl -Headers $headers -Method GET -UseBasicParsing | Out-Null
         } catch {
             Write-Host "  ✗ Failed to access: $file" -ForegroundColor Red
             Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
             Write-Host ""
-            Write-Host "Troubleshooting:" -ForegroundColor Yellow
-            Write-Host "  1. Verify repository exists: https://github.com/$privateRepoOwner/$privateRepoName" -ForegroundColor White
-            Write-Host "  2. Check file path: $file" -ForegroundColor White
-            Write-Host "  3. Ensure token has 'repo' scope" -ForegroundColor White
-            Write-Host "  4. Verify token owner has repository access" -ForegroundColor White
-            Write-Host "  5. Token may be expired - generate new one at: https://github.com/settings/tokens" -ForegroundColor White
+            Write-Host "Verify:" -ForegroundColor Yellow
+            Write-Host "  - Repository: https://github.com/$privateRepoOwner/$privateRepoName" -ForegroundColor White
+            Write-Host "  - Token has 'repo' scope" -ForegroundColor White
+            Write-Host "  - Token owner has repository access" -ForegroundColor White
             Read-Host "Press Enter to exit"
             exit 1
         }
     }
 
-    Write-Host "  ✓ Private repository access validated successfully" -ForegroundColor Green
+    Write-Host "  ✓ GitHub access validated successfully" -ForegroundColor Green
 
     # ================================
-    # STEP 4: DOWNLOAD CA CERTIFICATE (public repo)
-    # ================================
-    Write-Host ""
-    Write-Host "[2/8] Downloading CA certificate..." -ForegroundColor Green
-
-    $caCertPath = "$env:TEMP\ca.cer"
-    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-Files/main/ca.cer" -OutFile $caCertPath -UseBasicParsing
-    Write-Host "  ✓ CA certificate downloaded successfully" -ForegroundColor Green
-
-    # ================================
-    # STEP 5: IMPORT CA CERTIFICATE
+    # STEP 4: DOWNLOAD AND INSTALL CYBERSENTINEL AGENT
     # ================================
     Write-Host ""
-    Write-Host "[3/8] Importing CA certificate to Root store..." -ForegroundColor Green
+    Write-Host "[2/6] Downloading and installing CyberSentinel agent..." -ForegroundColor Green
 
-    Import-Certificate -FilePath $caCertPath -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-    Write-Host "  ✓ CA certificate imported successfully" -ForegroundColor Green
+    # Download CA certificate
+    Write-Host "  → Downloading CA certificate..." -ForegroundColor Cyan
+    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-Files/main/ca.cer" -OutFile "$env:TEMP\ca.cer" -UseBasicParsing
 
-    # ================================
-    # STEP 6: DOWNLOAD INSTALLER (public repo)
-    # ================================
-    Write-Host ""
-    Write-Host "[4/8] Downloading CyberSentinel agent installer..." -ForegroundColor Green
+    # Import CA certificate
+    Write-Host "  → Importing CA certificate..." -ForegroundColor Cyan
+    Import-Certificate -FilePath "$env:TEMP\ca.cer" -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
 
-    $installerPath = "$env:TEMP\cybersentinel-agent.msi"
-    Invoke-WebRequest -Uri "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent-1.0.0.msi" -OutFile $installerPath -UseBasicParsing
-    Write-Host "  ✓ Installer downloaded successfully" -ForegroundColor Green
+    # Download MSI installer
+    Write-Host "  → Downloading installer..." -ForegroundColor Cyan
+    Invoke-WebRequest -Uri "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent-1.0.0.msi" -OutFile "$env:TEMP\cybersentinel-agent.msi" -UseBasicParsing
 
-    # ================================
-    # STEP 7: INSTALL AGENT
-    # ================================
-    Write-Host ""
-    Write-Host "[5/8] Installing CyberSentinel agent..." -ForegroundColor Green
+    # Install agent
+    Write-Host "  → Installing agent..." -ForegroundColor Cyan
+    msiexec.exe /i "$env:TEMP\cybersentinel-agent.msi" /q WAZUH_MANAGER="$managerIP" WAZUH_AGENT_GROUP="windows" WAZUH_AGENT_NAME="$agentName" | Out-Null
+    
+    # Wait for installation to complete
+    Start-Sleep -Seconds 5
 
-    $arguments = @(
-        "/i",
-        "`"$installerPath`"",
-        "/q",
-        "WAZUH_MANAGER=$managerIP",
-        "WAZUH_AGENT_GROUP=windows",
-        "WAZUH_AGENT_NAME=$agentName"
-    )
-
-    Start-Process msiexec.exe -ArgumentList $arguments -Wait
-    Write-Host "  ✓ Installation completed successfully" -ForegroundColor Green
+    Write-Host "  ✓ CyberSentinel agent installed successfully" -ForegroundColor Green
 
     # ================================
-    # STEP 8: ENV + CONFIG SETUP
+    # STEP 5: WRITE .ENV FILE
     # ================================
     Write-Host ""
-    Write-Host "[6/8] Configuring environment..." -ForegroundColor Green
+    Write-Host "[3/6] Creating environment configuration..." -ForegroundColor Green
 
-    $ossecConfPath = "C:\Program Files (x86)\ossec-agent\ossec.conf"
-    $ossecDir      = Split-Path $ossecConfPath
-    $envFilePath   = Join-Path $ossecDir ".env"
+    $ossecDir = "C:\Program Files (x86)\ossec-agent"
+    $envFilePath = Join-Path $ossecDir ".env"
 
     @(
         "ManagerIP=$managerIP"
         "AgentName=$agentName"
     ) | Set-Content -Path $envFilePath -Encoding UTF8
 
-    Write-Host "  ✓ Environment configured successfully" -ForegroundColor Green
+    Write-Host "  ✓ Environment file created: $envFilePath" -ForegroundColor Green
 
     # ================================
-    # STEP 9: DOWNLOAD SECRET CONFIG FILES (private repo with token)
+    # STEP 6: FETCH CONFIG/SCRIPTS FROM GITHUB
     # ================================
     Write-Host ""
-    Write-Host "[7/8] Fetching secret configuration files from private repository..." -ForegroundColor Green
+    Write-Host "[4/6] Fetching configuration files from private repository..." -ForegroundColor Green
 
+    # Helper function to download files from GitHub API
     function Download-GitHubFile {
         param (
             [string]$RepoPath,
@@ -206,47 +168,53 @@ try {
 
         $apiUrl = "https://api.github.com/repos/$privateRepoOwner/$privateRepoName/contents/$RepoPath"
         $response = Invoke-RestMethod -Uri $apiUrl -Headers $headers -Method GET
-        $content  = [System.Text.Encoding]::UTF8.GetString(
-                        [System.Convert]::FromBase64String($response.content)
-                    )
+        $content = [System.Text.Encoding]::UTF8.GetString(
+            [System.Convert]::FromBase64String($response.content)
+        )
         Set-Content -Path $Destination -Value $content -Encoding UTF8
     }
 
     # Download ossec.conf
+    $ossecConfPath = Join-Path $ossecDir "ossec.conf"
     Write-Host "  → Downloading ossec.conf..." -ForegroundColor Cyan
-    Download-GitHubFile `
-        -RepoPath "AGENTS/WINDOWS-AGENT/ossec.conf" `
-        -Destination $ossecConfPath
+    Download-GitHubFile -RepoPath "AGENTS/WINDOWS-AGENT/ossec.conf" -Destination $ossecConfPath
 
-    # Download and execute enrich.ps1
+    # Download enrich.ps1
     $enrichScriptPath = Join-Path $ossecDir "enrich.ps1"
     Write-Host "  → Downloading enrich.ps1..." -ForegroundColor Cyan
-    Download-GitHubFile `
-        -RepoPath "AGENTS/WINDOWS-AGENT/enrich.ps1" `
-        -Destination $enrichScriptPath
+    Download-GitHubFile -RepoPath "AGENTS/WINDOWS-AGENT/enrich.ps1" -Destination $enrichScriptPath
 
+    # Download sysmon.ps1
+    $sysmonScriptPath = Join-Path $ossecDir "sysmon.ps1"
+    Write-Host "  → Downloading sysmon.ps1..." -ForegroundColor Cyan
+    Download-GitHubFile -RepoPath "AGENTS/WINDOWS-AGENT/sysmon.ps1" -Destination $sysmonScriptPath
+
+    Write-Host "  ✓ Configuration files downloaded successfully" -ForegroundColor Green
+
+    # ================================
+    # STEP 7: EXECUTE DOWNLOADED SCRIPTS
+    # ================================
+    Write-Host ""
+    Write-Host "[5/6] Executing configuration scripts..." -ForegroundColor Green
+
+    # Execute enrich.ps1
     Write-Host "  → Executing enrich.ps1..." -ForegroundColor Cyan
     powershell -ExecutionPolicy Bypass -File $enrichScriptPath
 
-    # Download and execute sysmon.ps1
-    $sysmonScriptPath = Join-Path $ossecDir "sysmon.ps1"
-    Write-Host "  → Downloading sysmon.ps1..." -ForegroundColor Cyan
-    Download-GitHubFile `
-        -RepoPath "AGENTS/WINDOWS-AGENT/sysmon.ps1" `
-        -Destination $sysmonScriptPath
-
+    # Execute sysmon.ps1
     Write-Host "  → Executing sysmon.ps1..." -ForegroundColor Cyan
     powershell -ExecutionPolicy Bypass -File $sysmonScriptPath
 
-    Write-Host "  ✓ Secret configuration files downloaded and executed successfully" -ForegroundColor Green
+    Write-Host "  ✓ Configuration scripts executed successfully" -ForegroundColor Green
 
     # ================================
-    # STEP 10: START SERVICE
+    # STEP 8: START SERVICE
     # ================================
     Write-Host ""
-    Write-Host "[8/8] Starting CyberSentinel service..." -ForegroundColor Green
+    Write-Host "[6/6] Starting CyberSentinel service..." -ForegroundColor Green
 
     NET START CyberSentinelSvc
+
     Write-Host "  ✓ CyberSentinel service started successfully" -ForegroundColor Green
 
     # ================================
@@ -254,8 +222,8 @@ try {
     # ================================
     Write-Host ""
     Write-Host "Cleaning up temporary files..." -ForegroundColor Yellow
-    Remove-Item -Path $caCertPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path "$env:TEMP\ca.cer" -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path "$env:TEMP\cybersentinel-agent.msi" -Force -ErrorAction SilentlyContinue
 
     # ================================
     # SUCCESS MESSAGE
@@ -271,7 +239,7 @@ try {
     Write-Host "  Agent Group: windows" -ForegroundColor White
     Write-Host "  Service Status: Running" -ForegroundColor Green
     Write-Host ""
-    Write-Host "CyberSentinel Agent Installed Successfully!" -ForegroundColor Green
+    Write-Host "Installation Directory: $ossecDir" -ForegroundColor White
     Write-Host ""
 }
 catch {
