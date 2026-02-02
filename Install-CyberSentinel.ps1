@@ -21,56 +21,6 @@ function Write-Log {
     "$timestamp [$Level] $Message" | Out-File -FilePath $logFile -Append -Encoding UTF8
 }
 
-function Show-Spinner {
-    param(
-        [string]$Message,
-        [scriptblock]$Action
-    )
-    
-    $frames = @('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏')
-    $frameIndex = 0
-    $completed = $false
-    $actionError = $null
-    
-    # Start the action in a background runspace
-    $runspace = [runspacefactory]::CreateRunspace()
-    $runspace.Open()
-    $runspace.SessionStateProxy.SetVariable('logFile', $logFile)
-    
-    $powershell = [powershell]::Create()
-    $powershell.Runspace = $runspace
-    $powershell.AddScript($Action) | Out-Null
-    
-    $handle = $powershell.BeginInvoke()
-    
-    # Show animation while action is running
-    while (-not $handle.IsCompleted) {
-        $frame = $frames[$frameIndex % $frames.Count]
-        Write-Host "`r  $frame $Message" -NoNewline -ForegroundColor Cyan
-        $frameIndex++
-        Start-Sleep -Milliseconds 100
-    }
-    
-    # Get results
-    try {
-        $result = $powershell.EndInvoke($handle)
-    } catch {
-        $actionError = $_
-    }
-    
-    $powershell.Dispose()
-    $runspace.Close()
-    
-    # Clear the spinner line
-    Write-Host "`r$(' ' * ($Message.Length + 10))`r" -NoNewline
-    
-    if ($actionError) {
-        throw $actionError
-    }
-    
-    return $result
-}
-
 function Read-SecureInput {
     param(
         [string]$Prompt,
@@ -197,7 +147,7 @@ try {
     Write-Host "================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Installing CyberSentinel Agent..." -ForegroundColor Yellow
-    Write-Host "Please wait while the installation completes." -ForegroundColor White
+    Write-Host "Please wait, this may take a few minutes..." -ForegroundColor White
     Write-Host ""
 
     # ================================
@@ -235,7 +185,7 @@ try {
             Write-Log "✗ Failed to access: $file - $($_.Exception.Message)" -Level "ERROR"
             $validationSuccess = $false
             
-            # Clear spinner area and show error
+            # Show error
             Write-Host ""
             Write-Host "  ✗ GitHub Access Failed" -ForegroundColor Red
             Write-Host ""
@@ -244,11 +194,9 @@ try {
             Write-Host ""
             Write-Host "  Verify:" -ForegroundColor Yellow
             Write-Host "    - Repository: https://github.com/$privateRepoOwner/$privateRepoName" -ForegroundColor White
-            Write-Host "    - Token has 'repo' scope" -ForegroundColor White
-            Write-Host "    - Token owner has repository access" -ForegroundColor White
-            Write-Host "    - Token is correct and not expired" -ForegroundColor White
+            Write-Host "    - Token has 'repo' scope and is not expired" -ForegroundColor White
             Write-Host ""
-            Write-Host "  Check log: $logFile" -ForegroundColor Gray
+            Write-Host "  Log: $logFile" -ForegroundColor Gray
             Write-Host ""
             Read-Host "Press Enter to exit"
             exit 1
@@ -276,7 +224,7 @@ try {
     Invoke-WebRequest -Uri "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent-1.0.0.msi" `
         -OutFile "$env:TEMP\cybersentinel-agent.msi" -UseBasicParsing 2>&1 | Out-File -FilePath $logFile -Append
 
-    # Install agent
+    # Install agent WITHOUT group to avoid MSI setting uppercase
     $msiLogPath = "$env:TEMP\cybersentinel-msi-install.log"
     Write-Log "Starting MSI installation"
     Write-Log "MSI log file: $msiLogPath"
@@ -296,14 +244,10 @@ try {
     
     if ($process.ExitCode -ne 0) {
         Write-Host ""
-        Write-Host "  ✗ MSI Installation Failed" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "  Exit Code: $($process.ExitCode)" -ForegroundColor Yellow
+        Write-Host "  ✗ MSI Installation Failed (Exit Code: $($process.ExitCode))" -ForegroundColor Red
         Write-Log "MSI installation failed with exit code: $($process.ExitCode)" -Level "ERROR"
         Write-Host ""
-        Write-Host "  Check logs:" -ForegroundColor Yellow
-        Write-Host "    - Script log: $logFile" -ForegroundColor White
-        Write-Host "    - MSI log: $msiLogPath" -ForegroundColor White
+        Write-Host "  Logs: $logFile" -ForegroundColor Gray
         Write-Host ""
         Read-Host "Press Enter to exit"
         exit 1
@@ -321,9 +265,7 @@ try {
     
     if (-not (Test-Path $ossecDir)) {
         Write-Host ""
-        Write-Host "  ✗ Installation Verification Failed" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "  Installation directory not found: $ossecDir" -ForegroundColor Yellow
+        Write-Host "  ✗ Installation directory not found: $ossecDir" -ForegroundColor Red
         Write-Log "Installation directory not found: $ossecDir" -Level "ERROR"
         Write-Host ""
         Read-Host "Press Enter to exit"
@@ -369,7 +311,7 @@ try {
         Write-Log "✓ Downloaded: $RepoPath" -Level "SUCCESS"
     }
 
-    # Stop service
+    # Stop service before making changes
     Write-Log "Stopping CyberSentinel service"
     try {
         Stop-Service -Name "CyberSentinelSvc" -Force -ErrorAction SilentlyContinue 2>&1 | Out-File -FilePath $logFile -Append
@@ -395,25 +337,20 @@ try {
     Write-Log "Configuration files downloaded successfully" -Level "SUCCESS"
 
     # ================================
-    # STEP 5.5: FIX GROUP CONFIGURATION
+    # STEP 5.5: FIX GROUP CONFIGURATION IN DOWNLOADED FILE
     # ================================
-    Write-Log "[5.5/7] Fixing ossec.conf group configuration..."
+    Write-Log "[5.5/7] Fixing ossec.conf group configuration (downloaded file)..."
     
-    Write-Log "Reading ossec.conf for group configuration fix"
+    Write-Log "Reading downloaded ossec.conf"
     $ossecConfContent = Get-Content $ossecConfPath -Raw
     
     # Fix any uppercase "Windows" to lowercase "windows"
-    $originalContent = $ossecConfContent
     $ossecConfContent = $ossecConfContent -replace '<groups>Windows</groups>', '<groups>windows</groups>'
     $ossecConfContent = $ossecConfContent -replace '<config-profile>Windows,', '<config-profile>windows,'
     $ossecConfContent = $ossecConfContent -replace '<config-profile>Windows</config-profile>', '<config-profile>windows</config-profile>'
     
-    if ($ossecConfContent -ne $originalContent) {
-        Set-Content -Path $ossecConfPath -Value $ossecConfContent -Encoding UTF8
-        Write-Log "Group configuration corrected to lowercase 'windows'" -Level "SUCCESS"
-    } else {
-        Write-Log "No group configuration changes needed" -Level "INFO"
-    }
+    Set-Content -Path $ossecConfPath -Value $ossecConfContent -Encoding UTF8
+    Write-Log "Downloaded ossec.conf group configuration set to lowercase 'windows'" -Level "SUCCESS"
 
     # ================================
     # STEP 6: EXECUTE CONFIGURATION SCRIPTS
@@ -448,7 +385,7 @@ try {
     Write-Log "Starting CyberSentinel service"
     try {
         Start-Service -Name "CyberSentinelSvc" -ErrorAction Stop 2>&1 | Out-File -FilePath $logFile -Append
-        Start-Sleep -Seconds 3
+        Start-Sleep -Seconds 5
         
         # Verify service
         $service = Get-Service -Name "CyberSentinelSvc"
@@ -460,9 +397,40 @@ try {
         Write-Log "Failed to start service: $($_.Exception.Message)" -Level "ERROR"
         Write-Log "Attempting to start via NET START" -Level "WARNING"
         NET START CyberSentinelSvc 2>&1 | Out-File -FilePath $logFile -Append
+        Start-Sleep -Seconds 5
     }
 
-    Write-Log "CyberSentinel service started successfully" -Level "SUCCESS"
+    # ================================
+    # STEP 7.5: FIX GROUP IN RUNNING CONFIG (CRITICAL FIX)
+    # ================================
+    Write-Log "[7.5/7] Applying final group configuration fix..."
+    
+    # Stop service again to modify the config that was potentially regenerated
+    Write-Log "Stopping service for final configuration fix"
+    Stop-Service -Name "CyberSentinelSvc" -Force -ErrorAction SilentlyContinue 2>&1 | Out-File -FilePath $logFile -Append
+    Start-Sleep -Seconds 3
+    
+    # Read the current ossec.conf (might have been modified by agent startup)
+    Write-Log "Re-reading ossec.conf to fix any runtime-generated group settings"
+    $ossecConfContent = Get-Content $ossecConfPath -Raw
+    
+    # Force all group references to lowercase
+    $ossecConfContent = $ossecConfContent -replace '<groups>Windows</groups>', '<groups>windows</groups>'
+    $ossecConfContent = $ossecConfContent -replace '<groups>WINDOWS</groups>', '<groups>windows</groups>'
+    $ossecConfContent = $ossecConfContent -replace '<config-profile>Windows,', '<config-profile>windows,'
+    $ossecConfContent = $ossecConfContent -replace '<config-profile>WINDOWS,', '<config-profile>windows,'
+    $ossecConfContent = $ossecConfContent -replace '<config-profile>Windows</config-profile>', '<config-profile>windows</config-profile>'
+    $ossecConfContent = $ossecConfContent -replace '<config-profile>WINDOWS</config-profile>', '<config-profile>windows</config-profile>'
+    
+    Set-Content -Path $ossecConfPath -Value $ossecConfContent -Encoding UTF8
+    Write-Log "Final group configuration enforced to lowercase 'windows'" -Level "SUCCESS"
+    
+    # Restart service with corrected config
+    Write-Log "Restarting service with corrected configuration"
+    Start-Service -Name "CyberSentinelSvc" -ErrorAction Stop 2>&1 | Out-File -FilePath $logFile -Append
+    Start-Sleep -Seconds 5
+    
+    Write-Log "CyberSentinel service restarted successfully with correct group" -Level "SUCCESS"
 
     # ================================
     # CLEANUP
@@ -487,40 +455,12 @@ try {
     Write-Host "  ████████████████████████████████████████████" -ForegroundColor Green
     Write-Host ""
     Write-Host ""
-    Write-Host "  Agent Details:" -ForegroundColor Yellow
-    Write-Host "  ─────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "    Manager IP:    $managerIP" -ForegroundColor White
-    Write-Host "    Agent Name:    $agentName" -ForegroundColor White
-    Write-Host "    Group:         windows (lowercase)" -ForegroundColor White
-    Write-Host "    Install Path:  $ossecDir" -ForegroundColor White
-    Write-Host ""
-    Write-Host "  Installation Log:" -ForegroundColor Yellow
-    Write-Host "  ─────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "    $logFile" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host ""
-    Write-Host "  Next Steps:" -ForegroundColor Yellow
+    Write-Host "  Agent Information:" -ForegroundColor Yellow
     Write-Host "  ─────────────────────────────────────────────" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "  1. On the manager ($managerIP), ensure the 'windows' group exists:" -ForegroundColor White
-    Write-Host ""
-    Write-Host "     sudo mkdir -p /var/ossec/etc/shared/windows" -ForegroundColor Cyan
-    Write-Host "     sudo chown -R wazuh:wazuh /var/ossec/etc/shared/windows" -ForegroundColor Cyan
-    Write-Host "     sudo systemctl restart wazuh-manager" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  2. Check agent logs for connection status:" -ForegroundColor White
-    Write-Host ""
-    Write-Host "     Get-Content '$ossecDir\ossec.log' -Tail 20" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  3. Verify agent is connected on manager:" -ForegroundColor White
-    Write-Host ""
-    Write-Host "     /var/ossec/bin/agent_control -l" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host ""
-    Write-Host "  ⚠ IMPORTANT:" -ForegroundColor Yellow
-    Write-Host "  ─────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "    The group name is 'windows' (lowercase)" -ForegroundColor White
-    Write-Host "    Ensure your manager configuration matches exactly" -ForegroundColor White
+    Write-Host "    Manager:   $managerIP" -ForegroundColor White
+    Write-Host "    Name:      $agentName" -ForegroundColor White
+    Write-Host "    Group:     windows" -ForegroundColor White
     Write-Host ""
     Write-Host ""
 }
@@ -533,20 +473,12 @@ catch {
     Write-Host "  ████████████████████████████████████████████" -ForegroundColor Red
     Write-Host ""
     Write-Host ""
-    Write-Host "  Error Details:" -ForegroundColor Yellow
-    Write-Host "  ─────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "    $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Log: $logFile" -ForegroundColor Gray
     Write-Host ""
     Write-Log "INSTALLATION ERROR: $($_.Exception.Message)" -Level "ERROR"
     Write-Log "Stack trace: $($_.ScriptStackTrace)" -Level "ERROR"
-    Write-Host ""
-    Write-Host "  Installation Logs:" -ForegroundColor Yellow
-    Write-Host "  ─────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "    Script log: $logFile" -ForegroundColor White
-    if (Test-Path "$env:TEMP\cybersentinel-msi-install.log") {
-        Write-Host "    MSI log:    $env:TEMP\cybersentinel-msi-install.log" -ForegroundColor White
-    }
-    Write-Host ""
     Write-Host ""
     Read-Host "Press Enter to exit"
     exit 1
