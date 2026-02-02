@@ -2,6 +2,11 @@
 # CyberSentinel Agent Installation Script
 # ================================
 
+param(
+    [Parameter(Mandatory=$false)]
+    [string]$GitHubToken
+)
+
 try {
     # ================================
     # GLOBAL HARDENING (MANDATORY)
@@ -58,20 +63,24 @@ try {
     # ================================
     # STEP 2: GITHUB TOKEN CONFIG (for private repo)
     # ================================
-    # IMPORTANT: Replace this with your valid GitHub Personal Access Token
-    # This is needed to access the PRIVATE config files repository
-    # Generate token at: https://github.com/settings/tokens (needs 'repo' scope)
-    
-    $githubToken = "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"
-    
-    if ($githubToken -eq "YOUR_GITHUB_TOKEN_HERE" -or [string]::IsNullOrWhiteSpace($githubToken)) {
-        Write-Host "ERROR: GitHub token not configured!" -ForegroundColor Red
-        Write-Host "This token is required to access private configuration files." -ForegroundColor Yellow
-        Write-Host "Please edit the script and replace 'YOUR_GITHUB_TOKEN_HERE' with your token." -ForegroundColor Yellow
-        Write-Host "Generate a token at: https://github.com/settings/tokens" -ForegroundColor Cyan
+    # Check if token was provided as parameter
+    if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
+        Write-Host ""
+        Write-Host "ERROR: GitHub token not provided!" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Please run the script with the -GitHubToken parameter:" -ForegroundColor Yellow
+        Write-Host "  irm https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-Files/main/Install-CyberSentinel.ps1 | iex -ArgumentList 'YOUR_TOKEN_HERE'" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Or use the full command:" -ForegroundColor Yellow
+        Write-Host "  `$token='YOUR_TOKEN'; irm URL | iex" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Generate a token at: https://github.com/settings/tokens (needs 'repo' scope)" -ForegroundColor White
         Read-Host "Press Enter to exit"
         exit 1
     }
+
+    # Use the provided token
+    $githubToken = $GitHubToken
 
     # GitHub API headers for private repo access
     $headers = @{
@@ -111,6 +120,7 @@ try {
             Write-Host "  2. Check file path: $file" -ForegroundColor White
             Write-Host "  3. Ensure token has 'repo' scope" -ForegroundColor White
             Write-Host "  4. Verify token owner has repository access" -ForegroundColor White
+            Write-Host "  5. Token may be expired - generate new one at: https://github.com/settings/tokens" -ForegroundColor White
             Read-Host "Press Enter to exit"
             exit 1
         }
@@ -276,4 +286,3 @@ catch {
 }
 
 Read-Host "Press Enter to exit"
-
