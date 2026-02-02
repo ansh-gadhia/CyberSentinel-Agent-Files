@@ -75,14 +75,25 @@ try {
         exit 1
     }
 
+    # ================================
+    # GITHUB REPOSITORY CONFIG
+    # ================================
+    # UPDATE THESE if your repository or file paths are different
+    $repoOwner = "cybersentinel-06"
+    $repoName  = "CyberSentinel-SIEM"
+    
+    # UPDATE THESE file paths if they're located elsewhere in your repo
+    $configFilePaths = @{
+        ossecConf  = "AGENTS/WINDOWS-AGENT/ossec.conf"
+        enrichScript = "AGENTS/WINDOWS-AGENT/enrich.ps1"
+        sysmonScript = "AGENTS/WINDOWS-AGENT/sysmon.ps1"
+    }
+
     $headers = @{
         Authorization = "Bearer $githubToken"
         "User-Agent"  = "CyberSentinel-Agent-Installer"
         Accept        = "application/vnd.github+json"
     }
-
-    $repoOwner = "cybersentinel-06"
-    $repoName  = "CyberSentinel-SIEM"
 
     # ================================
     # STEP 3: VALIDATE GITHUB ACCESS
@@ -91,14 +102,31 @@ try {
     Write-Host "[1/8] Validating GitHub access..." -ForegroundColor Green
 
     $filesToValidate = @(
-        "AGENTS/WINDOWS-AGENT/ossec.conf",
-        "AGENTS/WINDOWS-AGENT/enrich.ps1",
-        "AGENTS/WINDOWS-AGENT/sysmon.ps1"
+        $configFilePaths.ossecConf,
+        $configFilePaths.enrichScript,
+        $configFilePaths.sysmonScript
     )
 
     foreach ($file in $filesToValidate) {
         $validationUrl = "https://api.github.com/repos/$repoOwner/$repoName/contents/$file"
-        Invoke-WebRequest -Uri $validationUrl -Headers $headers -Method GET -UseBasicParsing | Out-Null
+        Write-Host "  → Testing: $validationUrl" -ForegroundColor Cyan
+        
+        try {
+            $response = Invoke-WebRequest -Uri $validationUrl -Headers $headers -Method GET -UseBasicParsing
+            Write-Host "  ✓ Access verified for: $file" -ForegroundColor Green
+        } catch {
+            Write-Host "  ✗ Failed to access: $file" -ForegroundColor Red
+            Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "  URL: $validationUrl" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "Please verify:" -ForegroundColor Yellow
+            Write-Host "  1. Repository exists: https://github.com/$repoOwner/$repoName" -ForegroundColor White
+            Write-Host "  2. File path is correct: $file" -ForegroundColor White
+            Write-Host "  3. GitHub token has 'repo' scope access" -ForegroundColor White
+            Write-Host "  4. Token belongs to an account with access to the repository" -ForegroundColor White
+            Read-Host "Press Enter to exit"
+            exit 1
+        }
     }
 
     Write-Host "  ✓ GitHub access validated successfully" -ForegroundColor Green
@@ -189,13 +217,13 @@ try {
 
     # Download ossec.conf
     Download-GitHubFile `
-        -RepoPath "AGENTS/WINDOWS-AGENT/ossec.conf" `
+        -RepoPath $configFilePaths.ossecConf `
         -Destination $ossecConfPath
 
     # Download and execute enrich.ps1
     $enrichScriptPath = Join-Path $ossecDir "enrich.ps1"
     Download-GitHubFile `
-        -RepoPath "AGENTS/WINDOWS-AGENT/enrich.ps1" `
+        -RepoPath $configFilePaths.enrichScript `
         -Destination $enrichScriptPath
 
     Write-Host "  → Executing enrich.ps1..." -ForegroundColor Cyan
@@ -204,7 +232,7 @@ try {
     # Download and execute sysmon.ps1
     $sysmonScriptPath = Join-Path $ossecDir "sysmon.ps1"
     Download-GitHubFile `
-        -RepoPath "AGENTS/WINDOWS-AGENT/sysmon.ps1" `
+        -RepoPath $configFilePaths.sysmonScript `
         -Destination $sysmonScriptPath
 
     Write-Host "  → Executing sysmon.ps1..." -ForegroundColor Cyan
