@@ -58,7 +58,22 @@ try {
     # ================================
     # STEP 2: GITHUB TOKEN CONFIG
     # ================================
-    $githubToken = "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"
+    # IMPORTANT: Replace this with your valid GitHub Personal Access Token
+    # Generate one at: https://github.com/settings/tokens
+    # Required scope: 'repo' (Full control of private repositories)
+    
+    $githubToken = "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"
+    
+    # Alternatively, use environment variable:
+    # $githubToken = $env:GITHUB_TOKEN
+    
+    if ($githubToken -eq "YOUR_GITHUB_TOKEN_HERE" -or [string]::IsNullOrWhiteSpace($githubToken)) {
+        Write-Host "ERROR: GitHub token not configured!" -ForegroundColor Red
+        Write-Host "Please edit the script and replace 'YOUR_GITHUB_TOKEN_HERE' with your actual token." -ForegroundColor Yellow
+        Write-Host "Generate a token at: https://github.com/settings/tokens" -ForegroundColor Cyan
+        Read-Host "Press Enter to exit"
+        exit 1
+    }
 
     $headers = @{
         Authorization = "Bearer $githubToken"
