@@ -10,7 +10,6 @@ $ProgressPreference   = "SilentlyContinue"
 
 # Setup logging
 $logFile = "$env:TEMP\cybersentinel-install-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
-$script:animationRunning = $true
 
 # ================================
 # HELPER FUNCTIONS
@@ -19,10 +18,10 @@ $script:animationRunning = $true
 function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "$timestamp [$Level] $message" | Out-File -FilePath $logFile -Append -Encoding UTF8
+    "$timestamp [$Level] $Message" | Out-File -FilePath $logFile -Append -Encoding UTF8
 }
 
-function Show-AnimatedProgress {
+function Show-Spinner {
     param(
         [string]$Message,
         [scriptblock]$Action
@@ -30,45 +29,46 @@ function Show-AnimatedProgress {
     
     $frames = @('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏')
     $frameIndex = 0
+    $completed = $false
+    $actionError = $null
     
-    # Start the action in a background job
-    $job = Start-Job -ScriptBlock $Action -ArgumentList $logFile
+    # Start the action in a background runspace
+    $runspace = [runspacefactory]::CreateRunspace()
+    $runspace.Open()
+    $runspace.SessionStateProxy.SetVariable('logFile', $logFile)
     
-    # Show animation while job is running
-    while ($job.State -eq 'Running') {
+    $powershell = [powershell]::Create()
+    $powershell.Runspace = $runspace
+    $powershell.AddScript($Action) | Out-Null
+    
+    $handle = $powershell.BeginInvoke()
+    
+    # Show animation while action is running
+    while (-not $handle.IsCompleted) {
         $frame = $frames[$frameIndex % $frames.Count]
-        Write-Host "`r$frame $Message" -NoNewline -ForegroundColor Cyan
+        Write-Host "`r  $frame $Message" -NoNewline -ForegroundColor Cyan
         $frameIndex++
         Start-Sleep -Milliseconds 100
     }
     
-    # Get job results
-    $result = Receive-Job -Job $job -Wait
-    Remove-Job -Job $job
+    # Get results
+    try {
+        $result = $powershell.EndInvoke($handle)
+    } catch {
+        $actionError = $_
+    }
     
-    # Clear the animation line
-    Write-Host "`r" -NoNewline
+    $powershell.Dispose()
+    $runspace.Close()
+    
+    # Clear the spinner line
+    Write-Host "`r$(' ' * ($Message.Length + 10))`r" -NoNewline
+    
+    if ($actionError) {
+        throw $actionError
+    }
     
     return $result
-}
-
-function Write-StepHeader {
-    param([string]$Step, [string]$Message)
-    Write-Host ""
-    Write-Host "[$Step] $Message" -ForegroundColor Green
-    Write-Log "[$Step] $Message"
-}
-
-function Write-Success {
-    param([string]$Message)
-    Write-Host "  ✓ $Message" -ForegroundColor Green
-    Write-Log "✓ $Message" -Level "SUCCESS"
-}
-
-function Write-Progress {
-    param([string]$Message)
-    Write-Host "  → $Message" -ForegroundColor Cyan
-    Write-Log "→ $Message"
 }
 
 function Read-SecureInput {
@@ -95,7 +95,7 @@ function Read-SecureInput {
                 Write-Host "`b `b" -NoNewline
             }
         }
-        else {
+        elseif ($key.Character -match '[^\x00-\x1F\x7F]') { # Only printable characters
             $input += $key.Character
             $secureString.AppendChar($key.Character)
             Write-Host "*" -NoNewline -ForegroundColor Gray
@@ -125,11 +125,11 @@ try {
     Write-Host "================================================" -ForegroundColor Cyan
     Write-Host ""
     
-    Write-Log "Installation started" -Level "INFO"
-    Write-Log "Log file: $logFile" -Level "INFO"
+    Write-Log "Installation started"
+    Write-Log "Log file: $logFile"
 
     # ================================
-    # STEP 1: COLLECT USER INPUTS
+    # COLLECT USER INPUTS
     # ================================
     Write-Host "Configuration Setup" -ForegroundColor Yellow
     Write-Host "─────────────────────────────────────────────────" -ForegroundColor DarkGray
@@ -159,6 +159,9 @@ try {
     Write-Host ""
     $GitHubToken = Read-SecureInput "Enter GitHub Personal Access Token: "
     
+    # Clean token - remove any control characters
+    $GitHubToken = $GitHubToken -replace '[\x00-\x1F\x7F]', ''
+    
     if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
         Write-Host ""
         Write-Host "ERROR: GitHub token cannot be empty!" -ForegroundColor Red
@@ -177,7 +180,7 @@ try {
     Write-Host "  Manager IP: $managerIP" -ForegroundColor White
     Write-Host "  Agent Name: $agentName" -ForegroundColor White
     Write-Host "  GitHub Token: " -NoNewline -ForegroundColor White
-    Write-Host ("*" * $GitHubToken.Length) -ForegroundColor Gray
+    Write-Host ("*" * [Math]::Min($GitHubToken.Length, 20)) -ForegroundColor Gray
     Write-Host ""
     
     $confirm = Read-Host "Proceed with installation? (Y/N)"
@@ -186,6 +189,16 @@ try {
         Write-Log "Installation cancelled by user" -Level "WARNING"
         exit 0
     }
+
+    # Clear screen for installation
+    Clear-Host
+    Write-Host "================================================" -ForegroundColor Cyan
+    Write-Host "   CyberSentinel Agent Installation            " -ForegroundColor Cyan
+    Write-Host "================================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Installing CyberSentinel Agent..." -ForegroundColor Yellow
+    Write-Host "Please wait while the installation completes." -ForegroundColor White
+    Write-Host ""
 
     # ================================
     # SETUP GITHUB CONFIGURATION
@@ -200,9 +213,9 @@ try {
     }
 
     # ================================
-    # STEP 2: VALIDATE GITHUB ACCESS
+    # STEP 1: VALIDATE GITHUB ACCESS
     # ================================
-    Write-StepHeader "1/7" "Validating GitHub access to private repository..."
+    Write-Log "[1/7] Validating GitHub access to private repository..."
     
     $filesToValidate = @(
         "AGENTS/WINDOWS-AGENT/ossec.conf",
@@ -219,51 +232,51 @@ try {
             Invoke-WebRequest -Uri $validationUrl -Headers $headers -Method GET -UseBasicParsing | Out-Null
             Write-Log "✓ Access validated: $file" -Level "SUCCESS"
         } catch {
-            Write-Host "  ✗ Failed to access: $file" -ForegroundColor Red
             Write-Log "✗ Failed to access: $file - $($_.Exception.Message)" -Level "ERROR"
             $validationSuccess = $false
-            break
+            
+            # Clear spinner area and show error
+            Write-Host ""
+            Write-Host "  ✗ GitHub Access Failed" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "  Could not access: $file" -ForegroundColor Yellow
+            Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "  Verify:" -ForegroundColor Yellow
+            Write-Host "    - Repository: https://github.com/$privateRepoOwner/$privateRepoName" -ForegroundColor White
+            Write-Host "    - Token has 'repo' scope" -ForegroundColor White
+            Write-Host "    - Token owner has repository access" -ForegroundColor White
+            Write-Host "    - Token is correct and not expired" -ForegroundColor White
+            Write-Host ""
+            Write-Host "  Check log: $logFile" -ForegroundColor Gray
+            Write-Host ""
+            Read-Host "Press Enter to exit"
+            exit 1
         }
     }
 
-    if (-not $validationSuccess) {
-        Write-Host ""
-        Write-Host "Verify:" -ForegroundColor Yellow
-        Write-Host "  - Repository: https://github.com/$privateRepoOwner/$privateRepoName" -ForegroundColor White
-        Write-Host "  - Token has 'repo' scope" -ForegroundColor White
-        Write-Host "  - Token owner has repository access" -ForegroundColor White
-        Write-Host ""
-        Write-Host "Check log file for details: $logFile" -ForegroundColor Yellow
-        Read-Host "Press Enter to exit"
-        exit 1
-    }
-
-    Write-Success "GitHub access validated successfully"
+    Write-Log "✓ GitHub access validated successfully" -Level "SUCCESS"
 
     # ================================
-    # STEP 3: DOWNLOAD AND INSTALL AGENT
+    # STEP 2: DOWNLOAD AND INSTALL AGENT
     # ================================
-    Write-StepHeader "2/7" "Downloading and installing CyberSentinel agent..."
+    Write-Log "[2/7] Downloading and installing CyberSentinel agent..."
     
     # Download CA certificate
-    Write-Progress "Downloading CA certificate..."
     Write-Log "Downloading CA certificate"
     Invoke-WebRequest -Uri "https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-Files/main/ca.cer" `
         -OutFile "$env:TEMP\ca.cer" -UseBasicParsing 2>&1 | Out-File -FilePath $logFile -Append
 
     # Import CA certificate
-    Write-Progress "Importing CA certificate..."
     Write-Log "Importing CA certificate"
     Import-Certificate -FilePath "$env:TEMP\ca.cer" -CertStoreLocation Cert:\LocalMachine\Root 2>&1 | Out-File -FilePath $logFile -Append
 
     # Download MSI installer
-    Write-Progress "Downloading installer (this may take a moment)..."
     Write-Log "Downloading MSI installer"
     Invoke-WebRequest -Uri "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent-1.0.0.msi" `
         -OutFile "$env:TEMP\cybersentinel-agent.msi" -UseBasicParsing 2>&1 | Out-File -FilePath $logFile -Append
 
     # Install agent
-    Write-Progress "Installing agent (this may take 1-2 minutes)..."
     $msiLogPath = "$env:TEMP\cybersentinel-msi-install.log"
     Write-Log "Starting MSI installation"
     Write-Log "MSI log file: $msiLogPath"
@@ -282,39 +295,47 @@ try {
     $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $installArgs -Wait -PassThru
     
     if ($process.ExitCode -ne 0) {
-        Write-Host "  ✗ Installation failed with exit code: $($process.ExitCode)" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  ✗ MSI Installation Failed" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  Exit Code: $($process.ExitCode)" -ForegroundColor Yellow
         Write-Log "MSI installation failed with exit code: $($process.ExitCode)" -Level "ERROR"
+        Write-Host ""
         Write-Host "  Check logs:" -ForegroundColor Yellow
         Write-Host "    - Script log: $logFile" -ForegroundColor White
         Write-Host "    - MSI log: $msiLogPath" -ForegroundColor White
-        throw "MSI installation failed"
+        Write-Host ""
+        Read-Host "Press Enter to exit"
+        exit 1
     }
     
     Write-Log "MSI installation completed successfully" -Level "SUCCESS"
     Start-Sleep -Seconds 3
 
-    Write-Success "CyberSentinel agent installed successfully"
-
     # ================================
-    # STEP 4: VERIFY INSTALLATION
+    # STEP 3: VERIFY INSTALLATION
     # ================================
-    Write-StepHeader "3/7" "Verifying installation..."
+    Write-Log "[3/7] Verifying installation..."
     
     $ossecDir = "C:\Program Files (x86)\ossec-agent"
     
     if (-not (Test-Path $ossecDir)) {
-        Write-Host "  ✗ Installation directory not found: $ossecDir" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  ✗ Installation Verification Failed" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  Installation directory not found: $ossecDir" -ForegroundColor Yellow
         Write-Log "Installation directory not found: $ossecDir" -Level "ERROR"
-        throw "Agent installation directory does not exist"
+        Write-Host ""
+        Read-Host "Press Enter to exit"
+        exit 1
     }
     
     Write-Log "Installation directory verified: $ossecDir" -Level "SUCCESS"
-    Write-Success "Installation directory verified: $ossecDir"
 
     # ================================
-    # STEP 5: CREATE ENVIRONMENT FILE
+    # STEP 4: CREATE ENVIRONMENT FILE
     # ================================
-    Write-StepHeader "4/7" "Creating environment configuration..."
+    Write-Log "[4/7] Creating environment configuration..."
     
     $envFilePath = Join-Path $ossecDir ".env"
     Write-Log "Creating .env file at: $envFilePath"
@@ -325,12 +346,11 @@ try {
     ) | Set-Content -Path $envFilePath -Encoding UTF8
 
     Write-Log ".env file created successfully" -Level "SUCCESS"
-    Write-Success "Environment file created: $envFilePath"
 
     # ================================
-    # STEP 6: FETCH CONFIGURATION FILES
+    # STEP 5: FETCH CONFIGURATION FILES
     # ================================
-    Write-StepHeader "5/7" "Fetching configuration files from private repository..."
+    Write-Log "[5/7] Fetching configuration files from private repository..."
 
     # Helper function to download files
     function Download-GitHubFile {
@@ -350,7 +370,7 @@ try {
     }
 
     # Stop service
-    Write-Progress "Stopping CyberSentinel service..."
+    Write-Log "Stopping CyberSentinel service"
     try {
         Stop-Service -Name "CyberSentinelSvc" -Force -ErrorAction SilentlyContinue 2>&1 | Out-File -FilePath $logFile -Append
         Start-Sleep -Seconds 2
@@ -361,23 +381,23 @@ try {
 
     # Download files
     $ossecConfPath = Join-Path $ossecDir "ossec.conf"
-    Write-Progress "Downloading ossec.conf..."
+    Write-Log "Downloading ossec.conf"
     Download-GitHubFile -RepoPath "AGENTS/WINDOWS-AGENT/ossec.conf" -Destination $ossecConfPath
 
     $enrichScriptPath = Join-Path $ossecDir "enrich.ps1"
-    Write-Progress "Downloading enrich.ps1..."
+    Write-Log "Downloading enrich.ps1"
     Download-GitHubFile -RepoPath "AGENTS/WINDOWS-AGENT/enrich.ps1" -Destination $enrichScriptPath
 
     $sysmonScriptPath = Join-Path $ossecDir "sysmon.ps1"
-    Write-Progress "Downloading sysmon.ps1..."
+    Write-Log "Downloading sysmon.ps1"
     Download-GitHubFile -RepoPath "AGENTS/WINDOWS-AGENT/sysmon.ps1" -Destination $sysmonScriptPath
 
-    Write-Success "Configuration files downloaded successfully"
+    Write-Log "Configuration files downloaded successfully" -Level "SUCCESS"
 
     # ================================
-    # STEP 6.5: FIX GROUP CONFIGURATION
+    # STEP 5.5: FIX GROUP CONFIGURATION
     # ================================
-    Write-StepHeader "5.5/7" "Fixing ossec.conf group configuration..."
+    Write-Log "[5.5/7] Fixing ossec.conf group configuration..."
     
     Write-Log "Reading ossec.conf for group configuration fix"
     $ossecConfContent = Get-Content $ossecConfPath -Raw
@@ -391,19 +411,16 @@ try {
     if ($ossecConfContent -ne $originalContent) {
         Set-Content -Path $ossecConfPath -Value $ossecConfContent -Encoding UTF8
         Write-Log "Group configuration corrected to lowercase 'windows'" -Level "SUCCESS"
-        Write-Success "Group configuration corrected to lowercase 'windows'"
     } else {
         Write-Log "No group configuration changes needed" -Level "INFO"
-        Write-Success "Group configuration already correct"
     }
 
     # ================================
-    # STEP 7: EXECUTE CONFIGURATION SCRIPTS
+    # STEP 6: EXECUTE CONFIGURATION SCRIPTS
     # ================================
-    Write-StepHeader "6/7" "Executing configuration scripts..."
+    Write-Log "[6/7] Executing configuration scripts..."
 
     # Execute enrich.ps1
-    Write-Progress "Executing enrich.ps1..."
     Write-Log "Executing enrich.ps1"
     try {
         & powershell.exe -ExecutionPolicy Bypass -File $enrichScriptPath 2>&1 | Out-File -FilePath $logFile -Append
@@ -413,7 +430,6 @@ try {
     }
 
     # Execute sysmon.ps1
-    Write-Progress "Executing sysmon.ps1 (installing Sysmon)..."
     Write-Log "Executing sysmon.ps1"
     try {
         & powershell.exe -ExecutionPolicy Bypass -File $sysmonScriptPath 2>&1 | Out-File -FilePath $logFile -Append
@@ -422,14 +438,13 @@ try {
         Write-Log "Warning: sysmon.ps1 execution had issues: $($_.Exception.Message)" -Level "WARNING"
     }
 
-    Write-Success "Configuration scripts executed successfully"
+    Write-Log "Configuration scripts executed successfully" -Level "SUCCESS"
 
     # ================================
-    # STEP 8: START SERVICE
+    # STEP 7: START SERVICE
     # ================================
-    Write-StepHeader "7/7" "Starting CyberSentinel service..."
+    Write-Log "[7/7] Starting CyberSentinel service..."
     
-    Write-Progress "Starting CyberSentinel service..."
     Write-Log "Starting CyberSentinel service"
     try {
         Start-Service -Name "CyberSentinelSvc" -ErrorAction Stop 2>&1 | Out-File -FilePath $logFile -Append
@@ -442,19 +457,16 @@ try {
         }
         Write-Log "Service started successfully" -Level "SUCCESS"
     } catch {
-        Write-Host "  ✗ Failed to start service: $($_.Exception.Message)" -ForegroundColor Red
         Write-Log "Failed to start service: $($_.Exception.Message)" -Level "ERROR"
-        Write-Host "  → Attempting to start via NET START..." -ForegroundColor Yellow
+        Write-Log "Attempting to start via NET START" -Level "WARNING"
         NET START CyberSentinelSvc 2>&1 | Out-File -FilePath $logFile -Append
     }
 
-    Write-Success "CyberSentinel service started successfully"
+    Write-Log "CyberSentinel service started successfully" -Level "SUCCESS"
 
     # ================================
     # CLEANUP
     # ================================
-    Write-Host ""
-    Write-Host "Cleaning up temporary files..." -ForegroundColor Yellow
     Write-Log "Cleaning up temporary files"
     Remove-Item -Path "$env:TEMP\ca.cer" -Force -ErrorAction SilentlyContinue
     Remove-Item -Path "$env:TEMP\cybersentinel-agent.msi" -Force -ErrorAction SilentlyContinue
@@ -464,49 +476,77 @@ try {
     # ================================
     Write-Log "Installation completed successfully" -Level "SUCCESS"
     
+    # Clear screen
+    Clear-Host
+    
     Write-Host ""
-    Write-Host "================================================" -ForegroundColor Cyan
-    Write-Host "   Installation completed successfully! ✓      " -ForegroundColor Green
-    Write-Host "================================================" -ForegroundColor Cyan
+    Write-Host "  ████████████████████████████████████████████" -ForegroundColor Green
+    Write-Host "  █                                          █" -ForegroundColor Green
+    Write-Host "  █     ✓ INSTALLATION SUCCESSFUL            █" -ForegroundColor Green
+    Write-Host "  █                                          █" -ForegroundColor Green
+    Write-Host "  ████████████████████████████████████████████" -ForegroundColor Green
     Write-Host ""
-    Write-Host "Agent Details:" -ForegroundColor Yellow
-    Write-Host "  Manager IP: $managerIP" -ForegroundColor White
-    Write-Host "  Agent Name: $agentName" -ForegroundColor White
-    Write-Host "  Installation Directory: $ossecDir" -ForegroundColor White
-    Write-Host "  Group: windows (lowercase)" -ForegroundColor White
     Write-Host ""
-    Write-Host "Installation Log: $logFile" -ForegroundColor Yellow
+    Write-Host "  Agent Details:" -ForegroundColor Yellow
+    Write-Host "  ─────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "    Manager IP:    $managerIP" -ForegroundColor White
+    Write-Host "    Agent Name:    $agentName" -ForegroundColor White
+    Write-Host "    Group:         windows (lowercase)" -ForegroundColor White
+    Write-Host "    Install Path:  $ossecDir" -ForegroundColor White
     Write-Host ""
-    Write-Host "Next Steps:" -ForegroundColor Yellow
+    Write-Host "  Installation Log:" -ForegroundColor Yellow
+    Write-Host "  ─────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "    $logFile" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host ""
+    Write-Host "  Next Steps:" -ForegroundColor Yellow
+    Write-Host "  ─────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host ""
     Write-Host "  1. On the manager ($managerIP), ensure the 'windows' group exists:" -ForegroundColor White
+    Write-Host ""
     Write-Host "     sudo mkdir -p /var/ossec/etc/shared/windows" -ForegroundColor Cyan
     Write-Host "     sudo chown -R wazuh:wazuh /var/ossec/etc/shared/windows" -ForegroundColor Cyan
     Write-Host "     sudo systemctl restart wazuh-manager" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  2. Check agent logs for connection status:" -ForegroundColor White
+    Write-Host ""
     Write-Host "     Get-Content '$ossecDir\ossec.log' -Tail 20" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  3. Verify agent is connected on manager:" -ForegroundColor White
+    Write-Host ""
     Write-Host "     /var/ossec/bin/agent_control -l" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "IMPORTANT: The group name is 'windows' (lowercase) - ensure your" -ForegroundColor Yellow
-    Write-Host "           manager configuration matches this exactly." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  ⚠ IMPORTANT:" -ForegroundColor Yellow
+    Write-Host "  ─────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "    The group name is 'windows' (lowercase)" -ForegroundColor White
+    Write-Host "    Ensure your manager configuration matches exactly" -ForegroundColor White
+    Write-Host ""
     Write-Host ""
 }
 catch {
     Write-Host ""
-    Write-Host "================================================" -ForegroundColor Red
-    Write-Host "   [INSTALLATION ERROR]                        " -ForegroundColor Red
-    Write-Host "================================================" -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host "  ████████████████████████████████████████████" -ForegroundColor Red
+    Write-Host "  █                                          █" -ForegroundColor Red
+    Write-Host "  █     ✗ INSTALLATION FAILED                █" -ForegroundColor Red
+    Write-Host "  █                                          █" -ForegroundColor Red
+    Write-Host "  ████████████████████████████████████████████" -ForegroundColor Red
+    Write-Host ""
+    Write-Host ""
+    Write-Host "  Error Details:" -ForegroundColor Yellow
+    Write-Host "  ─────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "    $($_.Exception.Message)" -ForegroundColor Red
     Write-Host ""
     Write-Log "INSTALLATION ERROR: $($_.Exception.Message)" -Level "ERROR"
     Write-Log "Stack trace: $($_.ScriptStackTrace)" -Level "ERROR"
-    Write-Host "Installation logs:" -ForegroundColor Yellow
-    Write-Host "  - Script log: $logFile" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Installation Logs:" -ForegroundColor Yellow
+    Write-Host "  ─────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "    Script log: $logFile" -ForegroundColor White
     if (Test-Path "$env:TEMP\cybersentinel-msi-install.log") {
-        Write-Host "  - MSI log: $env:TEMP\cybersentinel-msi-install.log" -ForegroundColor White
+        Write-Host "    MSI log:    $env:TEMP\cybersentinel-msi-install.log" -ForegroundColor White
     }
+    Write-Host ""
     Write-Host ""
     Read-Host "Press Enter to exit"
     exit 1
