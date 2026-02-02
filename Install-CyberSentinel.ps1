@@ -82,7 +82,7 @@ try {
     # ================================
     # STEP 3: VALIDATE ACCESS
     # ================================
-    Write-Host "[1/6] Validating GitHub access to private repository..." -ForegroundColor Green
+    Write-Host "[1/7] Validating GitHub access to private repository..." -ForegroundColor Green
 
     $filesToValidate = @(
         "AGENTS/WINDOWS-AGENT/ossec.conf",
@@ -114,7 +114,7 @@ try {
     # STEP 4: DOWNLOAD AND INSTALL CYBERSENTINEL AGENT
     # ================================
     Write-Host ""
-    Write-Host "[2/6] Downloading and installing CyberSentinel agent..." -ForegroundColor Green
+    Write-Host "[2/7] Downloading and installing CyberSentinel agent..." -ForegroundColor Green
 
     # Download CA certificate
     Write-Host "  → Downloading CA certificate..." -ForegroundColor Cyan
@@ -128,22 +128,56 @@ try {
     Write-Host "  → Downloading installer..." -ForegroundColor Cyan
     Invoke-WebRequest -Uri "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent-1.0.0.msi" -OutFile "$env:TEMP\cybersentinel-agent.msi" -UseBasicParsing
 
-    # Install agent
+    # Install agent WITHOUT group assignment (FIX #1)
     Write-Host "  → Installing agent..." -ForegroundColor Cyan
-    msiexec.exe /i "$env:TEMP\cybersentinel-agent.msi" /q WAZUH_MANAGER="$managerIP" WAZUH_AGENT_GROUP="windows" WAZUH_AGENT_NAME="$agentName" | Out-Null
+    $msiLogPath = "$env:TEMP\cybersentinel-install.log"
     
-    # Wait for installation to complete
-    Start-Sleep -Seconds 5
+    # Use Start-Process with -Wait to ensure installation completes (FIX #2)
+    $installArgs = @(
+        "/i"
+        "`"$env:TEMP\cybersentinel-agent.msi`""
+        "/qn"
+        "/norestart"
+        "WAZUH_MANAGER=`"$managerIP`""
+        "WAZUH_AGENT_NAME=`"$agentName`""
+        "/L*v"
+        "`"$msiLogPath`""
+    )
+    
+    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $installArgs -Wait -PassThru
+    
+    if ($process.ExitCode -ne 0) {
+        Write-Host "  ✗ Installation failed with exit code: $($process.ExitCode)" -ForegroundColor Red
+        Write-Host "  Check log: $msiLogPath" -ForegroundColor Yellow
+        throw "MSI installation failed"
+    }
+    
+    # Wait a bit more for service to be registered
+    Start-Sleep -Seconds 3
 
     Write-Host "  ✓ CyberSentinel agent installed successfully" -ForegroundColor Green
+
+    # ================================
+    # STEP 4.5: VERIFY INSTALLATION DIRECTORY EXISTS
+    # ================================
+    Write-Host ""
+    Write-Host "[3/7] Verifying installation..." -ForegroundColor Green
+    
+    $ossecDir = "C:\Program Files (x86)\ossec-agent"
+    
+    if (-not (Test-Path $ossecDir)) {
+        Write-Host "  ✗ Installation directory not found: $ossecDir" -ForegroundColor Red
+        throw "Agent installation directory does not exist"
+    }
+    
+    Write-Host "  ✓ Installation directory verified: $ossecDir" -ForegroundColor Green
 
     # ================================
     # STEP 5: WRITE .ENV FILE
     # ================================
     Write-Host ""
-    Write-Host "[3/6] Creating environment configuration..." -ForegroundColor Green
+    Write-Host "[4/7] Creating environment configuration..." -ForegroundColor Green
 
-    $ossecDir = "C:\Program Files (x86)\ossec-agent"
     $envFilePath = Join-Path $ossecDir ".env"
 
     @(
@@ -157,7 +191,7 @@ try {
     # STEP 6: FETCH CONFIG/SCRIPTS FROM GITHUB
     # ================================
     Write-Host ""
-    Write-Host "[4/6] Fetching configuration files from private repository..." -ForegroundColor Green
+    Write-Host "[5/7] Fetching configuration files from private repository..." -ForegroundColor Green
 
     # Helper function to download files from GitHub API
     function Download-GitHubFile {
@@ -172,6 +206,15 @@ try {
             [System.Convert]::FromBase64String($response.content)
         )
         Set-Content -Path $Destination -Value $content -Encoding UTF8
+    }
+
+    # Stop service before modifying configuration files (FIX #3)
+    Write-Host "  → Stopping CyberSentinel service..." -ForegroundColor Cyan
+    try {
+        Stop-Service -Name "CyberSentinelSvc" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    } catch {
+        Write-Host "  → Service not running or not found yet" -ForegroundColor Yellow
     }
 
     # Download ossec.conf
@@ -195,25 +238,66 @@ try {
     # STEP 7: EXECUTE DOWNLOADED SCRIPTS
     # ================================
     Write-Host ""
-    Write-Host "[5/6] Executing configuration scripts..." -ForegroundColor Green
+    Write-Host "[6/7] Executing configuration scripts..." -ForegroundColor Green
 
     # Execute enrich.ps1
     Write-Host "  → Executing enrich.ps1..." -ForegroundColor Cyan
-    powershell -ExecutionPolicy Bypass -File $enrichScriptPath
+    try {
+        & powershell.exe -ExecutionPolicy Bypass -File $enrichScriptPath
+    } catch {
+        Write-Host "  → Warning: enrich.ps1 execution had issues: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 
     # Execute sysmon.ps1
     Write-Host "  → Executing sysmon.ps1..." -ForegroundColor Cyan
-    powershell -ExecutionPolicy Bypass -File $sysmonScriptPath
+    try {
+        & powershell.exe -ExecutionPolicy Bypass -File $sysmonScriptPath
+    } catch {
+        Write-Host "  → Warning: sysmon.ps1 execution had issues: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 
     Write-Host "  ✓ Configuration scripts executed successfully" -ForegroundColor Green
 
     # ================================
-    # STEP 8: START SERVICE
+    # STEP 8: CONFIGURE AGENT GROUP MANUALLY
     # ================================
     Write-Host ""
-    Write-Host "[6/6] Starting CyberSentinel service..." -ForegroundColor Green
+    Write-Host "[7/7] Configuring agent and starting service..." -ForegroundColor Green
+    
+    # Modify ossec.conf to set group to lowercase "windows" (FIX #4)
+    $ossecConfContent = Get-Content $ossecConfPath -Raw
+    if ($ossecConfContent -notmatch '<client>') {
+        Write-Host "  → Adding client configuration block..." -ForegroundColor Cyan
+        # Add client block if it doesn't exist
+        $clientBlock = @"
 
-    NET START CyberSentinelSvc
+  <client>
+    <server>
+      <address>$managerIP</address>
+    </server>
+    <config-profile>windows</config-profile>
+  </client>
+"@
+        $ossecConfContent = $ossecConfContent -replace '</ossec_config>', "$clientBlock`n</ossec_config>"
+        Set-Content -Path $ossecConfPath -Value $ossecConfContent -Encoding UTF8
+    }
+
+    # Start the service
+    Write-Host "  → Starting CyberSentinel service..." -ForegroundColor Cyan
+    try {
+        Start-Service -Name "CyberSentinelSvc" -ErrorAction Stop
+        Start-Sleep -Seconds 3
+        
+        # Verify service is running
+        $service = Get-Service -Name "CyberSentinelSvc"
+        if ($service.Status -ne "Running") {
+            throw "Service failed to start properly"
+        }
+    } catch {
+        Write-Host "  ✗ Failed to start service: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  → Attempting to start via NET START..." -ForegroundColor Yellow
+        NET START CyberSentinelSvc
+    }
 
     Write-Host "  ✓ CyberSentinel service started successfully" -ForegroundColor Green
 
@@ -236,10 +320,19 @@ try {
     Write-Host "Agent Details:" -ForegroundColor Yellow
     Write-Host "  Manager IP: $managerIP" -ForegroundColor White
     Write-Host "  Agent Name: $agentName" -ForegroundColor White
-    Write-Host "  Agent Group: windows" -ForegroundColor White
-    Write-Host "  Service Status: Running" -ForegroundColor Green
+    Write-Host "  Installation Directory: $ossecDir" -ForegroundColor White
     Write-Host ""
-    Write-Host "Installation Directory: $ossecDir" -ForegroundColor White
+    Write-Host "Next Steps:" -ForegroundColor Yellow
+    Write-Host "  1. On the manager (192.168.1.222), ensure the 'windows' group exists:" -ForegroundColor White
+    Write-Host "     sudo mkdir -p /var/ossec/etc/shared/windows" -ForegroundColor Cyan
+    Write-Host "     sudo chown -R wazuh:wazuh /var/ossec/etc/shared/windows" -ForegroundColor Cyan
+    Write-Host "     sudo systemctl restart wazuh-manager" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  2. Check agent logs for connection status:" -ForegroundColor White
+    Write-Host "     Get-Content '$ossecDir\ossec.log' -Tail 20" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  3. If agent still shows 'Invalid group' error, restart the agent:" -ForegroundColor White
+    Write-Host "     Restart-Service CyberSentinelSvc" -ForegroundColor Cyan
     Write-Host ""
 }
 catch {
@@ -248,6 +341,8 @@ catch {
     Write-Host "   [INSTALLATION ERROR]                        " -ForegroundColor Red
     Write-Host "================================================" -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Installation log (if available): $env:TEMP\cybersentinel-install.log" -ForegroundColor Yellow
     Write-Host ""
     Read-Host "Press Enter to exit"
     exit 1
