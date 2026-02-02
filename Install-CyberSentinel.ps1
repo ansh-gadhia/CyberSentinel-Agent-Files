@@ -1,6 +1,6 @@
 # ================================
 # CyberSentinel Agent Installation Script
-# Fixed Version - Handles Group Registration Properly
+# Fixed Version - Properly Handles Enrollment Groups
 # ================================
 
 param(
@@ -28,7 +28,7 @@ try {
 
     Write-Host "================================================" -ForegroundColor Cyan
     Write-Host "   CyberSentinel Agent Installation Script     " -ForegroundColor Cyan
-    Write-Host "   Version 2.0 - Fixed Group Registration      " -ForegroundColor Cyan
+    Write-Host "   Version 2.1 - Fixed Enrollment Groups       " -ForegroundColor Cyan
     Write-Host "================================================" -ForegroundColor Cyan
     Write-Host ""
 
@@ -277,95 +277,113 @@ try {
     Write-Host "  ✓ Configuration files downloaded successfully" -ForegroundColor Green
 
     # ================================
-    # STEP 8: MODIFY OSSEC.CONF FOR GROUP SETTINGS
+    # STEP 8: FIX OSSEC.CONF GROUP SETTINGS
     # ================================
     Write-Host ""
-    Write-Host "[6/8] Configuring agent registration settings..." -ForegroundColor Green
+    Write-Host "[6/8] Fixing agent group configuration..." -ForegroundColor Green
 
     try {
+        # Read the XML file
         [xml]$ossecXml = Get-Content $ossecConfPath
 
-        # Find or create client node
+        # Find the client node
         $clientNode = $ossecXml.SelectSingleNode("//ossec_config/client")
-        if (-not $clientNode) {
-            $clientNode = $ossecXml.CreateElement("client")
-            $ossecXml.ossec_config.AppendChild($clientNode) | Out-Null
-        }
-
-        # Configure based on registration method
-        if ($ManualRegistration) {
-            Write-Host "  → Configuring for manual registration..." -ForegroundColor Cyan
-            
-            # Remove config-profile if exists
+        
+        if ($clientNode) {
+            # Fix config-profile (change to lowercase 'windows')
             $configProfile = $clientNode.SelectSingleNode("config-profile")
             if ($configProfile) {
-                $clientNode.RemoveChild($configProfile) | Out-Null
+                Write-Host "  → Changing config-profile to lowercase 'windows'..." -ForegroundColor Cyan
+                $configProfile.InnerText = "windows"
             }
 
-            # Disable enrollment
+            # Fix or remove enrollment groups
             $enrollment = $clientNode.SelectSingleNode("enrollment")
-            if (-not $enrollment) {
-                $enrollment = $ossecXml.CreateElement("enrollment")
-                $clientNode.AppendChild($enrollment) | Out-Null
+            if ($enrollment) {
+                if ($ManualRegistration) {
+                    Write-Host "  → Disabling enrollment for manual registration..." -ForegroundColor Cyan
+                    
+                    # Set enabled to no
+                    $enabled = $enrollment.SelectSingleNode("enabled")
+                    if ($enabled) {
+                        $enabled.InnerText = "no"
+                    }
+                    
+                    # Remove groups element
+                    $groups = $enrollment.SelectSingleNode("groups")
+                    if ($groups) {
+                        $enrollment.RemoveChild($groups) | Out-Null
+                    }
+                } else {
+                    Write-Host "  → Fixing enrollment groups to lowercase 'windows'..." -ForegroundColor Cyan
+                    
+                    # Set enabled to yes
+                    $enabled = $enrollment.SelectSingleNode("enabled")
+                    if ($enabled) {
+                        $enabled.InnerText = "yes"
+                    }
+                    
+                    # Fix groups to lowercase 'windows'
+                    $groups = $enrollment.SelectSingleNode("groups")
+                    if ($groups) {
+                        $groups.InnerText = "windows"
+                    } else {
+                        # Create groups element if it doesn't exist
+                        $groups = $ossecXml.CreateElement("groups")
+                        $groups.InnerText = "windows"
+                        $enrollment.AppendChild($groups) | Out-Null
+                    }
+                }
+            } else {
+                # Create enrollment section if it doesn't exist
+                if (-not $ManualRegistration) {
+                    Write-Host "  → Creating enrollment configuration..." -ForegroundColor Cyan
+                    
+                    $enrollment = $ossecXml.CreateElement("enrollment")
+                    
+                    $enabled = $ossecXml.CreateElement("enabled")
+                    $enabled.InnerText = "yes"
+                    $enrollment.AppendChild($enabled) | Out-Null
+                    
+                    $agentNameNode = $ossecXml.CreateElement("agent_name")
+                    $agentNameNode.InnerText = $agentName
+                    $enrollment.AppendChild($agentNameNode) | Out-Null
+                    
+                    $groups = $ossecXml.CreateElement("groups")
+                    $groups.InnerText = "windows"
+                    $enrollment.AppendChild($groups) | Out-Null
+                    
+                    $clientNode.AppendChild($enrollment) | Out-Null
+                }
             }
 
-            $enabled = $enrollment.SelectSingleNode("enabled")
-            if (-not $enabled) {
-                $enabled = $ossecXml.CreateElement("enabled")
-                $enrollment.AppendChild($enabled) | Out-Null
+            # Ensure server address is correct
+            $server = $clientNode.SelectSingleNode("server")
+            if ($server) {
+                $address = $server.SelectSingleNode("address")
+                if ($address) {
+                    $address.InnerText = $managerIP
+                }
             }
-            $enabled.InnerText = "no"
 
-            Write-Host "  ✓ Configured for manual registration" -ForegroundColor Green
-        } else {
-            Write-Host "  → Configuring for auto-registration with 'windows' group..." -ForegroundColor Cyan
+            # Save the modified XML
+            $ossecXml.Save($ossecConfPath)
+            Write-Host "  ✓ Configuration file fixed successfully" -ForegroundColor Green
             
-            # Set config-profile to lowercase 'windows'
-            $configProfile = $clientNode.SelectSingleNode("config-profile")
-            if (-not $configProfile) {
-                $configProfile = $ossecXml.CreateElement("config-profile")
-                $clientNode.AppendChild($configProfile) | Out-Null
+            # Display what we changed
+            Write-Host "  → Group set to: windows (lowercase)" -ForegroundColor Green
+            if ($ManualRegistration) {
+                Write-Host "  → Enrollment: Disabled" -ForegroundColor Green
+            } else {
+                Write-Host "  → Enrollment: Enabled with 'windows' group" -ForegroundColor Green
             }
-            $configProfile.InnerText = "windows"
-
-            # Enable enrollment
-            $enrollment = $clientNode.SelectSingleNode("enrollment")
-            if (-not $enrollment) {
-                $enrollment = $ossecXml.CreateElement("enrollment")
-                $clientNode.AppendChild($enrollment) | Out-Null
-            }
-
-            $enabled = $enrollment.SelectSingleNode("enabled")
-            if (-not $enabled) {
-                $enabled = $ossecXml.CreateElement("enabled")
-                $enrollment.AppendChild($enabled) | Out-Null
-            }
-            $enabled.InnerText = "yes"
-
-            Write-Host "  ✓ Configured for auto-registration" -ForegroundColor Green
+        } else {
+            Write-Host "  ✗ Could not find client node in ossec.conf" -ForegroundColor Red
         }
-
-        # Ensure server address is set
-        $server = $clientNode.SelectSingleNode("server")
-        if (-not $server) {
-            $server = $ossecXml.CreateElement("server")
-            $clientNode.AppendChild($server) | Out-Null
-        }
-
-        $address = $server.SelectSingleNode("address")
-        if (-not $address) {
-            $address = $ossecXml.CreateElement("address")
-            $server.AppendChild($address) | Out-Null
-        }
-        $address.InnerText = $managerIP
-
-        # Save modified config
-        $ossecXml.Save($ossecConfPath)
-        Write-Host "  ✓ Configuration file updated" -ForegroundColor Green
 
     } catch {
         Write-Host "  ✗ Failed to modify ossec.conf: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "  → Continuing with default configuration..." -ForegroundColor Yellow
+        Write-Host "  → Manual fix may be required" -ForegroundColor Yellow
     }
 
     # ================================
@@ -446,6 +464,7 @@ try {
     Write-Host "  Manager IP: $managerIP" -ForegroundColor White
     Write-Host "  Agent Name: $agentName" -ForegroundColor White
     Write-Host "  Installation Directory: $ossecDir" -ForegroundColor White
+    Write-Host "  Group: windows (lowercase)" -ForegroundColor White
     Write-Host "  Registration Method: $(if ($ManualRegistration) { 'Manual' } else { 'Auto' })" -ForegroundColor White
     Write-Host ""
 
@@ -483,15 +502,11 @@ try {
         Write-Host "   sudo chmod 750 /var/ossec/etc/shared/windows" -ForegroundColor White
         Write-Host "   sudo systemctl restart wazuh-manager" -ForegroundColor White
         Write-Host ""
-        Write-Host "2. Check agent logs for connection status:" -ForegroundColor Cyan
+        Write-Host "2. Check agent connection (wait 30 seconds, then run):" -ForegroundColor Cyan
         Write-Host "   Get-Content '$ossecDir\ossec.log' -Tail 20" -ForegroundColor White
         Write-Host ""
-        Write-Host "3. If you see 'Invalid group: Windows' error:" -ForegroundColor Cyan
-        Write-Host "   The MSI may be using uppercase 'Windows'. Create that group:" -ForegroundColor White
-        Write-Host "   sudo mkdir -p /var/ossec/etc/shared/Windows" -ForegroundColor White
-        Write-Host "   sudo chown -R wazuh:wazuh /var/ossec/etc/shared/Windows" -ForegroundColor White
-        Write-Host "   sudo systemctl restart wazuh-manager" -ForegroundColor White
-        Write-Host "   Restart-Service CyberSentinelSvc" -ForegroundColor White
+        Write-Host "3. Verify agent on manager:" -ForegroundColor Cyan
+        Write-Host "   sudo /var/ossec/bin/agent_control -l" -ForegroundColor White
         Write-Host ""
     }
 
@@ -499,7 +514,7 @@ try {
     Write-Host "  - View logs: Get-Content '$ossecDir\ossec.log' -Tail 50" -ForegroundColor White
     Write-Host "  - Check service: Get-Service CyberSentinelSvc" -ForegroundColor White
     Write-Host "  - Test connectivity: Test-NetConnection $managerIP -Port 1514" -ForegroundColor White
-    Write-Host "  - Installation log: $msiLogPath" -ForegroundColor White
+    Write-Host "  - Restart agent: Restart-Service CyberSentinelSvc" -ForegroundColor White
     Write-Host ""
 }
 catch {
