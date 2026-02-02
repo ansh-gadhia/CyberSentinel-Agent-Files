@@ -1,14 +1,10 @@
 # ================================
 # CyberSentinel Agent Installation Script
-# Fixed Version - Properly Handles Enrollment Groups
 # ================================
 
 param(
     [Parameter(Mandatory=$false)]
-    [string]$GitHubToken,
-    
-    [Parameter(Mandatory=$false)]
-    [switch]$ManualRegistration
+    [string]$GitHubToken
 )
 
 try {
@@ -28,7 +24,6 @@ try {
 
     Write-Host "================================================" -ForegroundColor Cyan
     Write-Host "   CyberSentinel Agent Installation Script     " -ForegroundColor Cyan
-    Write-Host "   Version 2.1 - Fixed Enrollment Groups       " -ForegroundColor Cyan
     Write-Host "================================================" -ForegroundColor Cyan
     Write-Host ""
 
@@ -59,19 +54,6 @@ try {
     Write-Host "  Agent Name: $agentName" -ForegroundColor White
     Write-Host ""
 
-    # Ask about registration method
-    if (-not $ManualRegistration) {
-        Write-Host "Registration Method:" -ForegroundColor Yellow
-        Write-Host "  [1] Auto-registration (requires 'windows' group on manager)" -ForegroundColor White
-        Write-Host "  [2] Manual registration (you'll register agent manually later)" -ForegroundColor White
-        $regChoice = Read-Host "Choose registration method (1 or 2)"
-        
-        if ($regChoice -eq "2") {
-            $ManualRegistration = $true
-        }
-    }
-    Write-Host ""
-
     # ================================
     # STEP 2: VERIFY TOKEN
     # ================================
@@ -100,7 +82,7 @@ try {
     # ================================
     # STEP 3: VALIDATE ACCESS
     # ================================
-    Write-Host "[1/8] Validating GitHub access to private repository..." -ForegroundColor Green
+    Write-Host "[1/7] Validating GitHub access to private repository..." -ForegroundColor Green
 
     $filesToValidate = @(
         "AGENTS/WINDOWS-AGENT/ossec.conf",
@@ -132,7 +114,7 @@ try {
     # STEP 4: DOWNLOAD AND INSTALL CYBERSENTINEL AGENT
     # ================================
     Write-Host ""
-    Write-Host "[2/8] Downloading and installing CyberSentinel agent..." -ForegroundColor Green
+    Write-Host "[2/7] Downloading and installing CyberSentinel agent..." -ForegroundColor Green
 
     # Download CA certificate
     Write-Host "  → Downloading CA certificate..." -ForegroundColor Cyan
@@ -146,11 +128,11 @@ try {
     Write-Host "  → Downloading installer..." -ForegroundColor Cyan
     Invoke-WebRequest -Uri "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent-1.0.0.msi" -OutFile "$env:TEMP\cybersentinel-agent.msi" -UseBasicParsing
 
-    # Install agent WITHOUT group assignment
+    # Install agent WITHOUT group assignment to avoid uppercase issue
     Write-Host "  → Installing agent..." -ForegroundColor Cyan
     $msiLogPath = "$env:TEMP\cybersentinel-install.log"
     
-    # Build installation arguments
+    # Use Start-Process with -Wait to ensure installation completes
     $installArgs = @(
         "/i"
         "`"$env:TEMP\cybersentinel-agent.msi`""
@@ -162,8 +144,7 @@ try {
         "`"$msiLogPath`""
     )
     
-    # Execute installation and wait for completion
-    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $installArgs -Wait -PassThru -NoNewWindow
+    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $installArgs -Wait -PassThru
     
     if ($process.ExitCode -ne 0) {
         Write-Host "  ✗ Installation failed with exit code: $($process.ExitCode)" -ForegroundColor Red
@@ -171,16 +152,16 @@ try {
         throw "MSI installation failed"
     }
     
-    # Wait for service registration
+    # Wait for service to be registered
     Start-Sleep -Seconds 3
 
     Write-Host "  ✓ CyberSentinel agent installed successfully" -ForegroundColor Green
 
     # ================================
-    # STEP 5: VERIFY INSTALLATION DIRECTORY EXISTS
+    # STEP 4.5: VERIFY INSTALLATION DIRECTORY EXISTS
     # ================================
     Write-Host ""
-    Write-Host "[3/8] Verifying installation..." -ForegroundColor Green
+    Write-Host "[3/7] Verifying installation..." -ForegroundColor Green
     
     $ossecDir = "C:\Program Files (x86)\ossec-agent"
     
@@ -189,44 +170,28 @@ try {
         throw "Agent installation directory does not exist"
     }
     
-    # Verify critical files exist
-    $criticalFiles = @(
-        "ossec-agent.exe",
-        "manage_agents.exe",
-        "agent-auth.exe"
-    )
-    
-    foreach ($file in $criticalFiles) {
-        $filePath = Join-Path $ossecDir $file
-        if (-not (Test-Path $filePath)) {
-            Write-Host "  ✗ Critical file missing: $file" -ForegroundColor Red
-            throw "Installation incomplete"
-        }
-    }
-    
     Write-Host "  ✓ Installation directory verified: $ossecDir" -ForegroundColor Green
 
     # ================================
-    # STEP 6: WRITE .ENV FILE
+    # STEP 5: WRITE .ENV FILE
     # ================================
     Write-Host ""
-    Write-Host "[4/8] Creating environment configuration..." -ForegroundColor Green
+    Write-Host "[4/7] Creating environment configuration..." -ForegroundColor Green
 
     $envFilePath = Join-Path $ossecDir ".env"
 
     @(
         "ManagerIP=$managerIP"
         "AgentName=$agentName"
-        "InstallDate=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
     ) | Set-Content -Path $envFilePath -Encoding UTF8
 
     Write-Host "  ✓ Environment file created: $envFilePath" -ForegroundColor Green
 
     # ================================
-    # STEP 7: FETCH CONFIG/SCRIPTS FROM GITHUB
+    # STEP 6: FETCH CONFIG/SCRIPTS FROM GITHUB
     # ================================
     Write-Host ""
-    Write-Host "[5/8] Fetching configuration files from private repository..." -ForegroundColor Green
+    Write-Host "[5/7] Fetching configuration files from private repository..." -ForegroundColor Green
 
     # Helper function to download files from GitHub API
     function Download-GitHubFile {
@@ -244,23 +209,16 @@ try {
     }
 
     # Stop service before modifying configuration files
-    Write-Host "  → Stopping CyberSentinel service (if running)..." -ForegroundColor Cyan
+    Write-Host "  → Stopping CyberSentinel service..." -ForegroundColor Cyan
     try {
         Stop-Service -Name "CyberSentinelSvc" -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
     } catch {
-        Write-Host "  → Service not running" -ForegroundColor Yellow
-    }
-
-    # Backup original ossec.conf
-    $ossecConfPath = Join-Path $ossecDir "ossec.conf"
-    if (Test-Path $ossecConfPath) {
-        $backupPath = Join-Path $ossecDir "ossec.conf.backup"
-        Copy-Item -Path $ossecConfPath -Destination $backupPath -Force
-        Write-Host "  → Original configuration backed up" -ForegroundColor Cyan
+        Write-Host "  → Service not running or not found yet" -ForegroundColor Yellow
     }
 
     # Download ossec.conf
+    $ossecConfPath = Join-Path $ossecDir "ossec.conf"
     Write-Host "  → Downloading ossec.conf..." -ForegroundColor Cyan
     Download-GitHubFile -RepoPath "AGENTS/WINDOWS-AGENT/ossec.conf" -Destination $ossecConfPath
 
@@ -277,128 +235,36 @@ try {
     Write-Host "  ✓ Configuration files downloaded successfully" -ForegroundColor Green
 
     # ================================
-    # STEP 8: FIX OSSEC.CONF GROUP SETTINGS
+    # STEP 6.5: FIX OSSEC.CONF GROUP CONFIGURATION
     # ================================
     Write-Host ""
-    Write-Host "[6/8] Fixing agent group configuration..." -ForegroundColor Green
-
-    try {
-        # Read the XML file
-        [xml]$ossecXml = Get-Content $ossecConfPath
-
-        # Find the client node
-        $clientNode = $ossecXml.SelectSingleNode("//ossec_config/client")
-        
-        if ($clientNode) {
-            # Fix config-profile (change to lowercase 'windows')
-            $configProfile = $clientNode.SelectSingleNode("config-profile")
-            if ($configProfile) {
-                Write-Host "  → Changing config-profile to lowercase 'windows'..." -ForegroundColor Cyan
-                $configProfile.InnerText = "windows"
-            }
-
-            # Fix or remove enrollment groups
-            $enrollment = $clientNode.SelectSingleNode("enrollment")
-            if ($enrollment) {
-                if ($ManualRegistration) {
-                    Write-Host "  → Disabling enrollment for manual registration..." -ForegroundColor Cyan
-                    
-                    # Set enabled to no
-                    $enabled = $enrollment.SelectSingleNode("enabled")
-                    if ($enabled) {
-                        $enabled.InnerText = "no"
-                    }
-                    
-                    # Remove groups element
-                    $groups = $enrollment.SelectSingleNode("groups")
-                    if ($groups) {
-                        $enrollment.RemoveChild($groups) | Out-Null
-                    }
-                } else {
-                    Write-Host "  → Fixing enrollment groups to lowercase 'windows'..." -ForegroundColor Cyan
-                    
-                    # Set enabled to yes
-                    $enabled = $enrollment.SelectSingleNode("enabled")
-                    if ($enabled) {
-                        $enabled.InnerText = "yes"
-                    }
-                    
-                    # Fix groups to lowercase 'windows'
-                    $groups = $enrollment.SelectSingleNode("groups")
-                    if ($groups) {
-                        $groups.InnerText = "windows"
-                    } else {
-                        # Create groups element if it doesn't exist
-                        $groups = $ossecXml.CreateElement("groups")
-                        $groups.InnerText = "windows"
-                        $enrollment.AppendChild($groups) | Out-Null
-                    }
-                }
-            } else {
-                # Create enrollment section if it doesn't exist
-                if (-not $ManualRegistration) {
-                    Write-Host "  → Creating enrollment configuration..." -ForegroundColor Cyan
-                    
-                    $enrollment = $ossecXml.CreateElement("enrollment")
-                    
-                    $enabled = $ossecXml.CreateElement("enabled")
-                    $enabled.InnerText = "yes"
-                    $enrollment.AppendChild($enabled) | Out-Null
-                    
-                    $agentNameNode = $ossecXml.CreateElement("agent_name")
-                    $agentNameNode.InnerText = $agentName
-                    $enrollment.AppendChild($agentNameNode) | Out-Null
-                    
-                    $groups = $ossecXml.CreateElement("groups")
-                    $groups.InnerText = "windows"
-                    $enrollment.AppendChild($groups) | Out-Null
-                    
-                    $clientNode.AppendChild($enrollment) | Out-Null
-                }
-            }
-
-            # Ensure server address is correct
-            $server = $clientNode.SelectSingleNode("server")
-            if ($server) {
-                $address = $server.SelectSingleNode("address")
-                if ($address) {
-                    $address.InnerText = $managerIP
-                }
-            }
-
-            # Save the modified XML
-            $ossecXml.Save($ossecConfPath)
-            Write-Host "  ✓ Configuration file fixed successfully" -ForegroundColor Green
-            
-            # Display what we changed
-            Write-Host "  → Group set to: windows (lowercase)" -ForegroundColor Green
-            if ($ManualRegistration) {
-                Write-Host "  → Enrollment: Disabled" -ForegroundColor Green
-            } else {
-                Write-Host "  → Enrollment: Enabled with 'windows' group" -ForegroundColor Green
-            }
-        } else {
-            Write-Host "  ✗ Could not find client node in ossec.conf" -ForegroundColor Red
-        }
-
-    } catch {
-        Write-Host "  ✗ Failed to modify ossec.conf: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "  → Manual fix may be required" -ForegroundColor Yellow
-    }
+    Write-Host "[5.5/7] Fixing ossec.conf group configuration..." -ForegroundColor Green
+    
+    # Read the downloaded ossec.conf
+    $ossecConfContent = Get-Content $ossecConfPath -Raw
+    
+    # Replace any uppercase "Windows" with lowercase "windows" in the groups tag
+    $ossecConfContent = $ossecConfContent -replace '<groups>Windows</groups>', '<groups>windows</groups>'
+    
+    # Also ensure config-profile uses lowercase
+    $ossecConfContent = $ossecConfContent -replace '<config-profile>Windows,', '<config-profile>windows,'
+    $ossecConfContent = $ossecConfContent -replace '<config-profile>Windows</config-profile>', '<config-profile>windows</config-profile>'
+    
+    # Save the corrected configuration
+    Set-Content -Path $ossecConfPath -Value $ossecConfContent -Encoding UTF8
+    
+    Write-Host "  ✓ Group configuration corrected to lowercase 'windows'" -ForegroundColor Green
 
     # ================================
-    # STEP 9: EXECUTE DOWNLOADED SCRIPTS
+    # STEP 7: EXECUTE DOWNLOADED SCRIPTS
     # ================================
     Write-Host ""
-    Write-Host "[7/8] Executing configuration scripts..." -ForegroundColor Green
+    Write-Host "[6/7] Executing configuration scripts..." -ForegroundColor Green
 
     # Execute enrich.ps1
     Write-Host "  → Executing enrich.ps1..." -ForegroundColor Cyan
     try {
-        $enrichOutput = & powershell.exe -ExecutionPolicy Bypass -File $enrichScriptPath 2>&1
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $null) {
-            Write-Host "  → Warning: enrich.ps1 returned exit code $LASTEXITCODE" -ForegroundColor Yellow
-        }
+        & powershell.exe -ExecutionPolicy Bypass -File $enrichScriptPath
     } catch {
         Write-Host "  → Warning: enrich.ps1 execution had issues: $($_.Exception.Message)" -ForegroundColor Yellow
     }
@@ -406,43 +272,37 @@ try {
     # Execute sysmon.ps1
     Write-Host "  → Executing sysmon.ps1..." -ForegroundColor Cyan
     try {
-        $sysmonOutput = & powershell.exe -ExecutionPolicy Bypass -File $sysmonScriptPath 2>&1
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $null) {
-            Write-Host "  → Warning: sysmon.ps1 returned exit code $LASTEXITCODE" -ForegroundColor Yellow
-        }
+        & powershell.exe -ExecutionPolicy Bypass -File $sysmonScriptPath
     } catch {
         Write-Host "  → Warning: sysmon.ps1 execution had issues: $($_.Exception.Message)" -ForegroundColor Yellow
     }
 
-    Write-Host "  ✓ Configuration scripts executed" -ForegroundColor Green
+    Write-Host "  ✓ Configuration scripts executed successfully" -ForegroundColor Green
 
     # ================================
-    # STEP 10: START SERVICE
+    # STEP 8: START SERVICE
     # ================================
     Write-Host ""
-    Write-Host "[8/8] Starting CyberSentinel service..." -ForegroundColor Green
-
+    Write-Host "[7/7] Starting CyberSentinel service..." -ForegroundColor Green
+    
+    # Start the service
+    Write-Host "  → Starting CyberSentinel service..." -ForegroundColor Cyan
     try {
         Start-Service -Name "CyberSentinelSvc" -ErrorAction Stop
         Start-Sleep -Seconds 3
         
         # Verify service is running
         $service = Get-Service -Name "CyberSentinelSvc"
-        if ($service.Status -eq "Running") {
-            Write-Host "  ✓ CyberSentinel service started successfully" -ForegroundColor Green
-        } else {
-            Write-Host "  ✗ Service status: $($service.Status)" -ForegroundColor Yellow
+        if ($service.Status -ne "Running") {
+            throw "Service failed to start properly"
         }
     } catch {
         Write-Host "  ✗ Failed to start service: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "  → Attempting alternative method..." -ForegroundColor Yellow
-        try {
-            NET START CyberSentinelSvc
-            Write-Host "  ✓ Service started via NET START" -ForegroundColor Green
-        } catch {
-            Write-Host "  ✗ Could not start service. Manual start may be required." -ForegroundColor Red
-        }
+        Write-Host "  → Attempting to start via NET START..." -ForegroundColor Yellow
+        NET START CyberSentinelSvc
     }
+
+    Write-Host "  ✓ CyberSentinel service started successfully" -ForegroundColor Green
 
     # ================================
     # CLEANUP
@@ -453,7 +313,7 @@ try {
     Remove-Item -Path "$env:TEMP\cybersentinel-agent.msi" -Force -ErrorAction SilentlyContinue
 
     # ================================
-    # SUCCESS MESSAGE & NEXT STEPS
+    # SUCCESS MESSAGE
     # ================================
     Write-Host ""
     Write-Host "================================================" -ForegroundColor Cyan
@@ -465,56 +325,21 @@ try {
     Write-Host "  Agent Name: $agentName" -ForegroundColor White
     Write-Host "  Installation Directory: $ossecDir" -ForegroundColor White
     Write-Host "  Group: windows (lowercase)" -ForegroundColor White
-    Write-Host "  Registration Method: $(if ($ManualRegistration) { 'Manual' } else { 'Auto' })" -ForegroundColor White
     Write-Host ""
-
-    if ($ManualRegistration) {
-        Write-Host "================================================" -ForegroundColor Yellow
-        Write-Host "   MANUAL REGISTRATION REQUIRED                " -ForegroundColor Yellow
-        Write-Host "================================================" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "Complete these steps to register the agent:" -ForegroundColor White
-        Write-Host ""
-        Write-Host "1. On the manager ($managerIP), run:" -ForegroundColor Cyan
-        Write-Host "   sudo /var/ossec/bin/manage_agents" -ForegroundColor White
-        Write-Host ""
-        Write-Host "2. Select 'A' to add a new agent" -ForegroundColor Cyan
-        Write-Host "   - Agent name: $agentName" -ForegroundColor White
-        Write-Host "   - Agent IP: any" -ForegroundColor White
-        Write-Host ""
-        Write-Host "3. Select 'E' to extract the key" -ForegroundColor Cyan
-        Write-Host "   - Enter the agent ID shown" -ForegroundColor White
-        Write-Host "   - Copy the entire key string" -ForegroundColor White
-        Write-Host ""
-        Write-Host "4. On this Windows machine, import the key:" -ForegroundColor Cyan
-        Write-Host "   & '$ossecDir\manage_agents.exe' -i 'PASTE_KEY_HERE'" -ForegroundColor White
-        Write-Host ""
-        Write-Host "5. Restart the agent service:" -ForegroundColor Cyan
-        Write-Host "   Restart-Service CyberSentinelSvc" -ForegroundColor White
-        Write-Host ""
-    } else {
-        Write-Host "Next Steps:" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "1. Ensure the 'windows' group exists on manager:" -ForegroundColor Cyan
-        Write-Host "   SSH to $managerIP and run:" -ForegroundColor White
-        Write-Host "   sudo mkdir -p /var/ossec/etc/shared/windows" -ForegroundColor White
-        Write-Host "   sudo chown -R wazuh:wazuh /var/ossec/etc/shared/windows" -ForegroundColor White
-        Write-Host "   sudo chmod 750 /var/ossec/etc/shared/windows" -ForegroundColor White
-        Write-Host "   sudo systemctl restart wazuh-manager" -ForegroundColor White
-        Write-Host ""
-        Write-Host "2. Check agent connection (wait 30 seconds, then run):" -ForegroundColor Cyan
-        Write-Host "   Get-Content '$ossecDir\ossec.log' -Tail 20" -ForegroundColor White
-        Write-Host ""
-        Write-Host "3. Verify agent on manager:" -ForegroundColor Cyan
-        Write-Host "   sudo /var/ossec/bin/agent_control -l" -ForegroundColor White
-        Write-Host ""
-    }
-
-    Write-Host "Troubleshooting:" -ForegroundColor Yellow
-    Write-Host "  - View logs: Get-Content '$ossecDir\ossec.log' -Tail 50" -ForegroundColor White
-    Write-Host "  - Check service: Get-Service CyberSentinelSvc" -ForegroundColor White
-    Write-Host "  - Test connectivity: Test-NetConnection $managerIP -Port 1514" -ForegroundColor White
-    Write-Host "  - Restart agent: Restart-Service CyberSentinelSvc" -ForegroundColor White
+    Write-Host "Next Steps:" -ForegroundColor Yellow
+    Write-Host "  1. On the manager ($managerIP), ensure the 'windows' group exists:" -ForegroundColor White
+    Write-Host "     sudo mkdir -p /var/ossec/etc/shared/windows" -ForegroundColor Cyan
+    Write-Host "     sudo chown -R wazuh:wazuh /var/ossec/etc/shared/windows" -ForegroundColor Cyan
+    Write-Host "     sudo systemctl restart wazuh-manager" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  2. Check agent logs for connection status:" -ForegroundColor White
+    Write-Host "     Get-Content '$ossecDir\ossec.log' -Tail 20" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  3. Verify agent is connected on manager:" -ForegroundColor White
+    Write-Host "     /var/ossec/bin/agent_control -l" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "IMPORTANT: The group name is 'windows' (lowercase) - ensure your" -ForegroundColor Yellow
+    Write-Host "           manager configuration matches this exactly." -ForegroundColor Yellow
     Write-Host ""
 }
 catch {
@@ -524,13 +349,7 @@ catch {
     Write-Host "================================================" -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
     Write-Host ""
-    Write-Host "Error Details:" -ForegroundColor Yellow
-    Write-Host $_.Exception.GetType().FullName -ForegroundColor Red
-    Write-Host "At line: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Yellow
-    Write-Host ""
-    if (Test-Path "$env:TEMP\cybersentinel-install.log") {
-        Write-Host "Installation log available at: $env:TEMP\cybersentinel-install.log" -ForegroundColor Yellow
-    }
+    Write-Host "Installation log (if available): $env:TEMP\cybersentinel-install.log" -ForegroundColor Yellow
     Write-Host ""
     Read-Host "Press Enter to exit"
     exit 1
