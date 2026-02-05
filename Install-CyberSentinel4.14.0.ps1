@@ -221,7 +221,7 @@ try {
 
     # Download MSI installer
     Write-Log "Downloading MSI installer"
-    Invoke-WebRequest -Uri "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent-4.14.0.msi" `
+    Invoke-WebRequest -Uri "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent4.14.0.msi" `
         -OutFile "$env:TEMP\cybersentinel-agent.msi" -UseBasicParsing 2>&1 | Out-File -FilePath $logFile -Append
 
     # Install agent WITHOUT group to avoid MSI setting uppercase
