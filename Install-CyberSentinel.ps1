@@ -224,7 +224,7 @@ try {
     Invoke-WebRequest -Uri "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent-1.0.0.msi" `
         -OutFile "$env:TEMP\cybersentinel-agent.msi" -UseBasicParsing 2>&1 | Out-File -FilePath $logFile -Append
 
-    # Install agent WITHOUT group to avoid MSI setting uppercase
+    # Install agent - let MSI set default group
     $msiLogPath = "$env:TEMP\cybersentinel-msi-install.log"
     Write-Log "Starting MSI installation"
     Write-Log "MSI log file: $msiLogPath"
@@ -337,22 +337,6 @@ try {
     Write-Log "Configuration files downloaded successfully" -Level "SUCCESS"
 
     # ================================
-    # STEP 5.5: FIX GROUP CONFIGURATION IN DOWNLOADED FILE
-    # ================================
-    Write-Log "[5.5/7] Fixing ossec.conf group configuration (downloaded file)..."
-    
-    Write-Log "Reading downloaded ossec.conf"
-    $ossecConfContent = Get-Content $ossecConfPath -Raw
-    
-    # Fix any uppercase "Windows" to lowercase "windows"
-    $ossecConfContent = $ossecConfContent -replace '<groups>Windows</groups>', '<groups>windows</groups>'
-    $ossecConfContent = $ossecConfContent -replace '<config-profile>Windows,', '<config-profile>windows,'
-    $ossecConfContent = $ossecConfContent -replace '<config-profile>Windows</config-profile>', '<config-profile>windows</config-profile>'
-    
-    Set-Content -Path $ossecConfPath -Value $ossecConfContent -Encoding UTF8
-    Write-Log "Downloaded ossec.conf group configuration set to lowercase 'windows'" -Level "SUCCESS"
-
-    # ================================
     # STEP 6: EXECUTE CONFIGURATION SCRIPTS
     # ================================
     Write-Log "[6/7] Executing configuration scripts..."
@@ -401,36 +385,21 @@ try {
     }
 
     # ================================
-    # STEP 7.5: FIX GROUP IN RUNNING CONFIG (CRITICAL FIX)
+    # STEP 7.5: DETECT ACTUAL GROUP FROM CONFIG
     # ================================
-    Write-Log "[7.5/7] Applying final group configuration fix..."
+    Write-Log "[7.5/7] Detecting configured group..."
     
-    # Stop service again to modify the config that was potentially regenerated
-    Write-Log "Stopping service for final configuration fix"
-    Stop-Service -Name "CyberSentinelSvc" -Force -ErrorAction SilentlyContinue 2>&1 | Out-File -FilePath $logFile -Append
-    Start-Sleep -Seconds 3
-    
-    # Read the current ossec.conf (might have been modified by agent startup)
-    Write-Log "Re-reading ossec.conf to fix any runtime-generated group settings"
+    # Read the ossec.conf to detect what group was actually set
     $ossecConfContent = Get-Content $ossecConfPath -Raw
     
-    # Force all group references to lowercase
-    $ossecConfContent = $ossecConfContent -replace '<groups>Windows</groups>', '<groups>windows</groups>'
-    $ossecConfContent = $ossecConfContent -replace '<groups>WINDOWS</groups>', '<groups>windows</groups>'
-    $ossecConfContent = $ossecConfContent -replace '<config-profile>Windows,', '<config-profile>windows,'
-    $ossecConfContent = $ossecConfContent -replace '<config-profile>WINDOWS,', '<config-profile>windows,'
-    $ossecConfContent = $ossecConfContent -replace '<config-profile>Windows</config-profile>', '<config-profile>windows</config-profile>'
-    $ossecConfContent = $ossecConfContent -replace '<config-profile>WINDOWS</config-profile>', '<config-profile>windows</config-profile>'
-    
-    Set-Content -Path $ossecConfPath -Value $ossecConfContent -Encoding UTF8
-    Write-Log "Final group configuration enforced to lowercase 'windows'" -Level "SUCCESS"
-    
-    # Restart service with corrected config
-    Write-Log "Restarting service with corrected configuration"
-    Start-Service -Name "CyberSentinelSvc" -ErrorAction Stop 2>&1 | Out-File -FilePath $logFile -Append
-    Start-Sleep -Seconds 5
-    
-    Write-Log "CyberSentinel service restarted successfully with correct group" -Level "SUCCESS"
+    # Extract group from config
+    $detectedGroup = "default"
+    if ($ossecConfContent -match '<groups>([^<]+)</groups>') {
+        $detectedGroup = $matches[1]
+        Write-Log "Detected group from configuration: $detectedGroup" -Level "SUCCESS"
+    } else {
+        Write-Log "No group tag found in configuration, using default" -Level "WARNING"
+    }
 
     # ================================
     # CLEANUP
@@ -460,7 +429,7 @@ try {
     Write-Host ""
     Write-Host "    Manager:   $managerIP" -ForegroundColor White
     Write-Host "    Name:      $agentName" -ForegroundColor White
-    Write-Host "    Group:     windows" -ForegroundColor White
+    Write-Host "    Group:     $detectedGroup" -ForegroundColor White
     Write-Host ""
     Write-Host ""
 }
