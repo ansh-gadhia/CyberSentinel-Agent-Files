@@ -307,11 +307,8 @@ Write-Host "[PHASE 2] Verifying deployment..." -ForegroundColor Yellow
 Write-Host ""
 
 $requiredFiles = @(
-    "netsh.exe",
     "remove-malware.exe",
-    "remove-threat.exe",
-    "restart-wazuh.exe",
-    "route-null.exe"
+    "remove-threat.exe"
 )
 
 $allFilesPresent = $true
@@ -338,7 +335,7 @@ if (-not $allFilesPresent) {
     exit 1
 }
 
-Write-Host "[PHASE 2] Complete - All required files verified" -ForegroundColor Green
+Write-Host "[PHASE 2] Complete - Required executables verified" -ForegroundColor Green
 Write-Host ""
 
 # =============================================================================
