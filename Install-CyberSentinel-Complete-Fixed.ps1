@@ -1,6 +1,7 @@
 # ================================
 # CyberSentinel Complete Installation Script
 # Agent + Active Response
+# Version 2.0 - SSL Error Fixed
 # ================================
 
 # ================================
@@ -330,6 +331,102 @@ function Test-PythonInstallation {
     }
 }
 
+function Install-PythonPackageWithRetry {
+    param(
+        [string]$PythonCmd,
+        [string]$PackageName,
+        [int]$MaxRetries = 3
+    )
+    
+    Write-Host "  Installing $PackageName..." -ForegroundColor Gray
+    Write-Log "Attempting to install $PackageName"
+    
+    # Strategy 1: Normal installation with upgraded certifi
+    for ($i = 1; $i -le $MaxRetries; $i++) {
+        try {
+            Write-Log "Attempt $i of $MaxRetries - Standard installation"
+            $output = & $pythonCmd -m pip install $PackageName --upgrade --no-warn-script-location 2>&1
+            
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  $PackageName installed successfully" -ForegroundColor Green
+                Write-Log "$PackageName installed successfully on attempt $i"
+                return $true
+            }
+            
+            Write-Log "Standard installation failed on attempt $i" -Level "WARNING"
+        }
+        catch {
+            Write-Log "Exception on attempt $i : $($_.Exception.Message)" -Level "WARNING"
+        }
+        
+        if ($i -lt $MaxRetries) {
+            Write-Host "  Retrying..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 2
+        }
+    }
+    
+    # Strategy 2: Use trusted host (bypasses SSL for PyPI)
+    Write-Host "  Trying with trusted host..." -ForegroundColor Yellow
+    Write-Log "Attempting installation with --trusted-host flags"
+    
+    for ($i = 1; $i -le $MaxRetries; $i++) {
+        try {
+            $output = & $pythonCmd -m pip install $PackageName `
+                --trusted-host pypi.org `
+                --trusted-host files.pythonhosted.org `
+                --trusted-host pypi.python.org `
+                --no-warn-script-location 2>&1
+            
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  $PackageName installed successfully (trusted host)" -ForegroundColor Green
+                Write-Log "$PackageName installed with trusted host on attempt $i"
+                return $true
+            }
+            
+            Write-Log "Trusted host installation failed on attempt $i" -Level "WARNING"
+        }
+        catch {
+            Write-Log "Trusted host exception on attempt $i : $($_.Exception.Message)" -Level "WARNING"
+        }
+        
+        if ($i -lt $MaxRetries) {
+            Start-Sleep -Seconds 2
+        }
+    }
+    
+    # Strategy 3: Disable SSL verification (last resort)
+    Write-Host "  Trying without SSL verification (last resort)..." -ForegroundColor Yellow
+    Write-Log "Attempting installation with SSL verification disabled"
+    
+    try {
+        # Temporarily set environment variable to disable SSL
+        $env:PYTHONHTTPSVERIFY = "0"
+        
+        $output = & $pythonCmd -m pip install $PackageName `
+            --trusted-host pypi.org `
+            --trusted-host files.pythonhosted.org `
+            --index-url http://pypi.python.org/simple/ `
+            --no-warn-script-location 2>&1
+        
+        # Re-enable SSL
+        Remove-Item Env:\PYTHONHTTPSVERIFY -ErrorAction SilentlyContinue
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  $PackageName installed successfully (no SSL)" -ForegroundColor Green
+            Write-Log "$PackageName installed without SSL verification"
+            return $true
+        }
+    }
+    catch {
+        Write-Log "No SSL installation failed: $($_.Exception.Message)" -Level "ERROR"
+        Remove-Item Env:\PYTHONHTTPSVERIFY -ErrorAction SilentlyContinue
+    }
+    
+    Write-Host "  Failed to install $PackageName after all attempts" -ForegroundColor Red
+    Write-Log "All installation strategies failed for $PackageName" -Level "ERROR"
+    return $false
+}
+
 # ================================
 # CHECK ADMINISTRATOR PRIVILEGES
 # ================================
@@ -344,10 +441,11 @@ Clear-Host
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "   CyberSentinel Complete Installation  " -ForegroundColor Cyan
 Write-Host "   Agent + Active Response Setup        " -ForegroundColor Cyan
+Write-Host "   Version 2.0 - SSL Error Fixed        " -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-Write-Log "Complete installation started"
+Write-Log "Complete installation started (Version 2.0)"
 Write-Log "Log file: $logFile"
 
 # ================================
@@ -781,14 +879,14 @@ try {
     }
 
     # ================================
-    # INSTALL PYTHON 3.14.0 IF NEEDED
+    # INSTALL PYTHON 3.13.1 IF NEEDED
     # ================================
     
     if ($needPythonInstall) {
-        Write-Host "=== Installing Python 3.14.0... ===" -ForegroundColor White
-        Write-Log "Starting Python 3.14.0 installation"
+        Write-Host "=== Installing Python 3.13.1... ===" -ForegroundColor White
+        Write-Log "Starting Python 3.13.1 installation"
         
-        $pythonVersion = "3.14.0"
+        $pythonVersion = "3.13.1"
         $pythonInstaller = "$env:TEMP\python-$pythonVersion-installer.exe"
         
         # Download URLs
@@ -884,7 +982,7 @@ try {
         # Find Python executable
         $pythonExe = $null
         $possiblePaths = @(
-            "C:\Program Files\Python314\python.exe",
+            "C:\Program Files\Python313\python.exe",
             "C:\Program Files\Python$($pythonVersion.Replace('.',''))\python.exe",
             (Get-Command python -ErrorAction SilentlyContinue).Source,
             (Get-Command py -ErrorAction SilentlyContinue).Source
@@ -926,11 +1024,11 @@ try {
     }
 
     # ================================
-    # INSTALL PIP AND PYINSTALLER
+    # INSTALL PIP AND PYINSTALLER WITH SSL FIX
     # ================================
     
-    Write-Host "`n=== Installing Python packages... ===" -ForegroundColor White
-    Write-Log "Installing pip and PyInstaller"
+    Write-Host "`n=== Installing Python packages (with SSL error handling)... ===" -ForegroundColor White
+    Write-Log "Installing pip and PyInstaller with SSL error handling"
     
     # Determine Python command
     $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
@@ -941,24 +1039,75 @@ try {
     }
     
     Write-Host "  Using: $pythonCmd" -ForegroundColor Gray
+    Write-Log "Using Python command: $pythonCmd"
     
-    # Upgrade pip first
-    Write-Host "  Upgrading pip..." -ForegroundColor Gray
-    & $pythonCmd -m ensurepip --upgrade 2>&1 | Out-Null
-    & $pythonCmd -m pip install --upgrade pip --no-warn-script-location 2>&1 | Out-Null
+    # First, try to upgrade pip with SSL bypass
+    Write-Host "  Upgrading pip (with SSL workaround)..." -ForegroundColor Gray
     
-    # Install PyInstaller
-    Write-Host "  Installing PyInstaller..." -ForegroundColor Gray
-    $pyinstallerOutput = & $pythonCmd -m pip install pyinstaller --no-warn-script-location 2>&1
-    
-    # Check for errors
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log "PyInstaller installation failed" -Level "ERROR"
-        Write-Log "Output: $pyinstallerOutput" -Level "ERROR"
-        throw "PyInstaller installation failed"
+    # Method 1: Try standard upgrade first
+    try {
+        & $pythonCmd -m ensurepip --upgrade 2>&1 | Out-Null
+        Write-Log "ensurepip completed"
+    } catch {
+        Write-Log "ensurepip warning: $($_.Exception.Message)" -Level "WARNING"
     }
     
-    Write-Host "  Packages installed successfully" -ForegroundColor Green
+    # Method 2: Upgrade pip with trusted hosts
+    $pipUpgradeSuccess = $false
+    
+    try {
+        Write-Log "Attempting pip upgrade with trusted hosts"
+        $output = & $pythonCmd -m pip install --upgrade pip `
+            --trusted-host pypi.org `
+            --trusted-host files.pythonhosted.org `
+            --trusted-host pypi.python.org `
+            --no-warn-script-location 2>&1
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  Pip upgraded successfully" -ForegroundColor Green
+            Write-Log "Pip upgraded successfully"
+            $pipUpgradeSuccess = $true
+        }
+    } catch {
+        Write-Log "Pip upgrade attempt 1 failed: $($_.Exception.Message)" -Level "WARNING"
+    }
+    
+    # Method 3: If still failing, use HTTP (last resort)
+    if (-not $pipUpgradeSuccess) {
+        try {
+            Write-Log "Attempting pip upgrade with HTTP fallback"
+            $env:PYTHONHTTPSVERIFY = "0"
+            
+            $output = & $pythonCmd -m pip install --upgrade pip `
+                --trusted-host pypi.org `
+                --trusted-host files.pythonhosted.org `
+                --index-url http://pypi.python.org/simple/ `
+                --no-warn-script-location 2>&1
+            
+            Remove-Item Env:\PYTHONHTTPSVERIFY -ErrorAction SilentlyContinue
+            
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  Pip upgraded successfully (HTTP fallback)" -ForegroundColor Green
+                Write-Log "Pip upgraded with HTTP fallback"
+            }
+        } catch {
+            Write-Log "Pip upgrade attempt 2 failed: $($_.Exception.Message)" -Level "WARNING"
+            Remove-Item Env:\PYTHONHTTPSVERIFY -ErrorAction SilentlyContinue
+        }
+    }
+    
+    # Install PyInstaller using the retry function
+    $pyinstallerInstalled = Install-PythonPackageWithRetry -PythonCmd $pythonCmd -PackageName "pyinstaller"
+    
+    if (-not $pyinstallerInstalled) {
+        Write-Host ""
+        Write-Host "  CRITICAL: Failed to install PyInstaller after all attempts" -ForegroundColor Red
+        Write-Host ""
+        Write-Log "PyInstaller installation failed after all retry attempts" -Level "ERROR"
+        throw "PyInstaller installation failed - Cannot proceed"
+    }
+    
+    Write-Host "  All packages installed successfully" -ForegroundColor Green
     Write-Log "pip and PyInstaller installed successfully"
     
     # Get Scripts path
@@ -1144,8 +1293,8 @@ Write-Host ""
 Write-Host "  Summary:" -ForegroundColor Yellow
 Write-Host "  ---------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "    CyberSentinel-agent successfully installed" -ForegroundColor Green
-Write-Host "    Active-Response successfully installed" -ForegroundColor Green
+Write-Host "    ✓ CyberSentinel-agent successfully installed" -ForegroundColor Green
+Write-Host "    ✓ Active-Response successfully installed" -ForegroundColor Green
 Write-Host ""
 Write-Host ""
 Write-Host "  Installation Details:" -ForegroundColor White
@@ -1162,7 +1311,7 @@ foreach ($file in @("remove-malware.exe", "remove-threat.exe")) {
     $filePath = "C:\Program Files (x86)\ossec-agent\active-response\bin\$file"
     if (Test-Path $filePath) {
         $fileSize = (Get-Item $filePath).Length
-        Write-Host "      - $file - $([math]::Round($fileSize/1KB, 2)) KB" -ForegroundColor White
+        Write-Host "      ✓ $file - $([math]::Round($fileSize/1KB, 2)) KB" -ForegroundColor White
     }
 }
 Write-Host ""
