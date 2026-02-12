@@ -59,6 +59,277 @@ function Read-SecureInput {
     return $input
 }
 
+function Remove-PythonCompletely {
+    Write-Host "`n=== Completely removing existing Python installations... ===" -ForegroundColor White
+    Write-Log "Starting complete Python removal"
+    
+    # Stop all Python processes
+    Write-Host "  Stopping Python processes..." -ForegroundColor Gray
+    $pythonProcesses = Get-Process | Where-Object { $_.ProcessName -like "*python*" }
+    if ($pythonProcesses) {
+        foreach ($proc in $pythonProcesses) {
+            try {
+                Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+                Write-Log "Stopped Python process: $($proc.ProcessName) - PID: $($proc.Id)"
+            }
+            catch {
+                Write-Log "Could not stop process $($proc.Id): $($_.Exception.Message)" -Level "WARNING"
+            }
+        }
+    }
+    Start-Sleep -Seconds 2
+
+    # Uninstall via Registry
+    Write-Host "  Uninstalling via registry..." -ForegroundColor Gray
+    $uninstallPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    )
+
+    foreach ($path in $uninstallPaths) {
+        if (Test-Path $path) {
+            Get-ChildItem $path | ForEach-Object {
+                $app = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                if ($app.DisplayName -like "*Python*") {
+                    $uninstallString = $app.UninstallString
+                    if ($uninstallString -match "msiexec") {
+                        $guid = $uninstallString -replace '.*(\{[A-F0-9-]+\}).*', '$1'
+                        Write-Log "Uninstalling: $($app.DisplayName)"
+                        Start-Process "msiexec.exe" -ArgumentList "/x $guid /qn /norestart" -Wait -NoNewWindow -PassThru | Out-Null
+                    }
+                }
+            }
+        }
+    }
+
+    # Remove Microsoft Store Python
+    Write-Host "  Removing Microsoft Store Python..." -ForegroundColor Gray
+    $storeApps = Get-AppxPackage | Where-Object { $_.Name -like "*Python*" }
+    foreach ($app in $storeApps) {
+        try {
+            Remove-AppxPackage -Package $app.PackageFullName -ErrorAction Stop
+            Write-Log "Removed Store Python: $($app.Name)"
+        } catch { }
+    }
+
+    # Force remove directories
+    Write-Host "  Removing Python directories..." -ForegroundColor Gray
+    $dirsToCheck = @(
+        "$env:LOCALAPPDATA\Programs\Python*",
+        "$env:LOCALAPPDATA\Python*",
+        "$env:APPDATA\Python",
+        "$env:ProgramFiles\Python*",
+        "${env:ProgramFiles(x86)}\Python*",
+        "C:\Python*"
+    )
+
+    foreach ($pattern in $dirsToCheck) {
+        $dirs = Get-Item $pattern -ErrorAction SilentlyContinue
+        if ($dirs) {
+            foreach ($dir in $dirs) {
+                Write-Log "Removing directory: $($dir.FullName)"
+                try {
+                    takeown /f "$($dir.FullName)" /r /d y 2>&1 | Out-Null
+                    icacls "$($dir.FullName)" /grant administrators:F /t 2>&1 | Out-Null
+                    Remove-Item $dir.FullName -Recurse -Force -ErrorAction Stop
+                }
+                catch {
+                    Get-ChildItem $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                        Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+                    }
+                    try { Remove-Item $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+                }
+            }
+        }
+    }
+
+    # Clean PATH
+    Write-Host "  Cleaning PATH variables..." -ForegroundColor Gray
+    foreach ($scope in @("User", "Machine")) {
+        try {
+            $currentPath = [Environment]::GetEnvironmentVariable("Path", $scope)
+            if ($currentPath) {
+                $pathArray = $currentPath -split ';'
+                $newPathArray = @()
+                foreach ($p in $pathArray) {
+                    if ($p -notlike "*Python*" -and $p -notlike "*\Scripts" -and $p -ne "") {
+                        $newPathArray += $p
+                    }
+                }
+                if ($pathArray.Count -ne $newPathArray.Count) {
+                    $newPath = $newPathArray -join ';'
+                    [Environment]::SetEnvironmentVariable("Path", $newPath, $scope)
+                    Write-Log "Cleaned $scope PATH"
+                }
+            }
+        } catch { }
+    }
+
+    # Remove pip cache
+    Write-Host "  Cleaning pip cache..." -ForegroundColor Gray
+    $pipDirs = @("$env:LOCALAPPDATA\pip", "$env:APPDATA\pip")
+    foreach ($dir in $pipDirs) {
+        if (Test-Path $dir) {
+            try {
+                Remove-Item $dir -Recurse -Force -ErrorAction Stop
+                Write-Log "Removed pip cache: $dir"
+            } catch { }
+        }
+    }
+
+    # Clean registry
+    Write-Host "  Cleaning registry..." -ForegroundColor Gray
+    $regKeys = @(
+        "HKCU:\Software\Python",
+        "HKLM:\Software\Python",
+        "HKLM:\Software\WOW6432Node\Python"
+    )
+    foreach ($key in $regKeys) {
+        if (Test-Path $key) {
+            try {
+                Remove-Item $key -Recurse -Force -ErrorAction Stop
+                Write-Log "Removed registry key: $key"
+            } catch { }
+        }
+    }
+
+    # Remove file associations
+    $assocKeys = @(
+        "HKCU:\Software\Classes\.py",
+        "HKCU:\Software\Classes\.pyw",
+        "HKCU:\Software\Classes\.pyc",
+        "HKCU:\Software\Classes\Python.File",
+        "HKCU:\Software\Classes\Python.NoConFile",
+        "HKCU:\Software\Classes\Python.CompiledFile"
+    )
+    foreach ($key in $assocKeys) {
+        if (Test-Path $key) {
+            try { Remove-Item $key -Recurse -Force -ErrorAction Stop } catch { }
+        }
+    }
+
+    Write-Host "  Python removal complete" -ForegroundColor Green
+    Write-Log "Python completely removed"
+}
+
+function Test-PythonInstallation {
+    param([string]$MinVersion = "3.12.1")
+    
+    Write-Host "`n=== Checking existing Python installation... ===" -ForegroundColor White
+    
+    # Try multiple Python commands
+    $pythonCommands = @("python", "py", "python3")
+    $pythonExe = $null
+    
+    foreach ($cmd in $pythonCommands) {
+        try {
+            $cmdPath = (Get-Command $cmd -ErrorAction SilentlyContinue).Source
+            if ($cmdPath -and (Test-Path $cmdPath)) {
+                $pythonExe = $cmdPath
+                break
+            }
+        } catch { }
+    }
+    
+    if (-not $pythonExe) {
+        Write-Host "  No Python found" -ForegroundColor Yellow
+        Write-Log "No Python installation detected"
+        return @{
+            Installed = $false
+            NeedsReinstall = $true
+            Reason = "Not installed"
+        }
+    }
+    
+    Write-Host "  Python found at: $pythonExe" -ForegroundColor Green
+    Write-Log "Python found: $pythonExe"
+    
+    # Check version
+    try {
+        $versionOutput = & $pythonExe --version 2>&1
+        if ($versionOutput -match 'Python (\d+\.\d+\.\d+)') {
+            $currentVersion = [version]$matches[1]
+            $minVer = [version]$MinVersion
+            
+            Write-Host "  Current version: $currentVersion" -ForegroundColor Cyan
+            Write-Log "Python version: $currentVersion"
+            
+            if ($currentVersion -lt $minVer) {
+                Write-Host "  Version too old - minimum required: $MinVersion" -ForegroundColor Red
+                Write-Log "Python version $currentVersion is below minimum $MinVersion"
+                return @{
+                    Installed = $true
+                    NeedsReinstall = $true
+                    Reason = "Version $currentVersion < $MinVersion"
+                }
+            }
+        }
+    } catch {
+        Write-Host "  Could not determine version" -ForegroundColor Red
+        Write-Log "Failed to get Python version: $($_.Exception.Message)" -Level "ERROR"
+        return @{
+            Installed = $true
+            NeedsReinstall = $true
+            Reason = "Version check failed"
+        }
+    }
+    
+    # Check for PyInstaller
+    try {
+        $pyinstallerCheck = & $pythonExe -m pip show pyinstaller 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  PyInstaller not found" -ForegroundColor Red
+            Write-Log "PyInstaller not installed"
+            return @{
+                Installed = $true
+                NeedsReinstall = $true
+                Reason = "PyInstaller missing"
+            }
+        }
+        Write-Host "  PyInstaller found" -ForegroundColor Green
+        Write-Log "PyInstaller is installed"
+    } catch {
+        Write-Host "  PyInstaller check failed" -ForegroundColor Red
+        Write-Log "PyInstaller check failed: $($_.Exception.Message)" -Level "ERROR"
+        return @{
+            Installed = $true
+            NeedsReinstall = $true
+            Reason = "PyInstaller check failed"
+        }
+    }
+    
+    # Validate pip is working
+    try {
+        $pipCheck = & $pythonExe -m pip --version 2>&1
+        if ($LASTEXITCODE -ne 0 -or $pipCheck -like "*WARNING*invalid*") {
+            Write-Host "  Pip installation corrupted" -ForegroundColor Red
+            Write-Log "Pip validation failed: $pipCheck" -Level "ERROR"
+            return @{
+                Installed = $true
+                NeedsReinstall = $true
+                Reason = "Pip corrupted"
+            }
+        }
+        Write-Host "  Pip working correctly" -ForegroundColor Green
+    } catch {
+        Write-Host "  Pip validation failed" -ForegroundColor Red
+        return @{
+            Installed = $true
+            NeedsReinstall = $true
+            Reason = "Pip validation failed"
+        }
+    }
+    
+    Write-Host "  Python installation is valid" -ForegroundColor Green
+    Write-Log "Python installation validated successfully"
+    return @{
+        Installed = $true
+        NeedsReinstall = $false
+        Reason = "Valid installation"
+    }
+}
+
 # ================================
 # CHECK ADMINISTRATOR PRIVILEGES
 # ================================
@@ -485,41 +756,44 @@ try {
     
     Write-Log "Starting Phase 2: Active Response Setup"
 
-    # =============================================================================
-    # PHASE 2.1: INSTALL PYTHON AND BUILD ACTIVE RESPONSE TOOLS
-    # =============================================================================
-
-    Write-Host "[PHASE 2.1] Installing Python and building executables..." -ForegroundColor Yellow
-    Write-Host ""
-
-    # --- Check Python installation ---
-    Write-Host "=== Checking for Python installation... ===" -ForegroundColor White
-    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
-
-    $needPythonInstall = $false
-    if ($pythonCmd) {
-        $pythonPath = $pythonCmd.Source
-        Write-Host "Python found at: $pythonPath" -ForegroundColor Green
-        $fileInfo = Get-Item $pythonPath
-        if ($fileInfo.Length -eq 0) {
-            Write-Warning "Python executable is 0 KB. Deleting corrupted file..."
-            Remove-Item -Force $pythonPath
-            $needPythonInstall = $true
+    # ================================
+    # CHECK AND VALIDATE PYTHON
+    # ================================
+    
+    $pythonCheck = Test-PythonInstallation -MinVersion "3.12.1"
+    
+    if ($pythonCheck.NeedsReinstall) {
+        Write-Host ""
+        Write-Host "  Python needs reinstallation" -ForegroundColor Yellow
+        Write-Host "  Reason: $($pythonCheck.Reason)" -ForegroundColor Yellow
+        Write-Host ""
+        
+        if ($pythonCheck.Installed) {
+            Remove-PythonCompletely
         }
-    } else {
-        Write-Warning "Python is not installed."
+        
         $needPythonInstall = $true
+    } else {
+        Write-Host ""
+        Write-Host "  Using existing Python installation" -ForegroundColor Green
+        Write-Host ""
+        $needPythonInstall = $false
     }
 
-    # --- Install Python if needed (FULLY AUTOMATED) ---
+    # ================================
+    # INSTALL PYTHON 3.14.0 IF NEEDED
+    # ================================
+    
     if ($needPythonInstall) {
-        $pythonInstaller = "$env:TEMP\python-installer.exe"
-        $pythonVersion = "3.13.1"
+        Write-Host "=== Installing Python 3.14.0... ===" -ForegroundColor White
+        Write-Log "Starting Python 3.14.0 installation"
         
-        # Multiple download sources
+        $pythonVersion = "3.14.0"
+        $pythonInstaller = "$env:TEMP\python-$pythonVersion-installer.exe"
+        
+        # Download URLs
         $downloadUrls = @(
-            "https://www.python.org/ftp/python/$pythonVersion/python-$pythonVersion-amd64.exe",
-            "https://github.com/python/cpython/releases/download/v$pythonVersion/python-$pythonVersion-amd64.exe"
+            "https://www.python.org/ftp/python/$pythonVersion/python-$pythonVersion-amd64.exe"
         )
         
         $downloadSuccess = $false
@@ -528,29 +802,28 @@ try {
         if (Test-Path $pythonInstaller) {
             $fileSize = (Get-Item $pythonInstaller).Length
             if ($fileSize -gt 10MB) {
-                Write-Host "=== Using existing Python installer... ===" -ForegroundColor Green
+                Write-Host "  Using existing Python installer" -ForegroundColor Green
                 $downloadSuccess = $true
             } else {
                 Remove-Item $pythonInstaller -Force
             }
         }
         
-        # Try downloading from multiple sources
+        # Download Python installer
         if (-not $downloadSuccess) {
-            Write-Host "=== Downloading Python installer... ===" -ForegroundColor White
+            Write-Host "  Downloading Python $pythonVersion installer..." -ForegroundColor Gray
             
             foreach ($url in $downloadUrls) {
-                Write-Host "  Trying: $url" -ForegroundColor Gray
                 try {
                     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                    $ProgressPreference = 'SilentlyContinue'
-                    Invoke-WebRequest -Uri $url -OutFile $pythonInstaller -UseBasicParsing -TimeoutSec 60
+                    Write-Log "Downloading from: $url"
+                    Invoke-WebRequest -Uri $url -OutFile $pythonInstaller -UseBasicParsing -TimeoutSec 120
                     
-                    # Verify download
                     if (Test-Path $pythonInstaller) {
                         $fileSize = (Get-Item $pythonInstaller).Length
                         if ($fileSize -gt 10MB) {
                             Write-Host "  Download complete - $([math]::Round($fileSize/1MB, 2)) MB" -ForegroundColor Green
+                            Write-Log "Python installer downloaded successfully"
                             $downloadSuccess = $true
                             break
                         } else {
@@ -559,17 +832,23 @@ try {
                     }
                 }
                 catch {
-                    Write-Warning "  Failed: $($_.Exception.Message)"
+                    Write-Log "Download failed from $url : $($_.Exception.Message)" -Level "ERROR"
                     continue
                 }
             }
         }
         
         if (-not $downloadSuccess) {
-            throw "Failed to download Python installer"
+            Write-Host ""
+            Write-Host "  Failed to download Python installer!" -ForegroundColor Red
+            Write-Host ""
+            Write-Log "Failed to download Python installer" -Level "ERROR"
+            throw "Python installer download failed - Cannot proceed"
         }
 
-        Write-Host "=== Installing Python silently... ===" -ForegroundColor White
+        # Install Python silently
+        Write-Host "  Installing Python $pythonVersion..." -ForegroundColor Gray
+        Write-Log "Starting Python installation"
         
         $installArgs = @(
             "/quiet",
@@ -583,29 +862,30 @@ try {
             "Shortcuts=0"
         )
         
-        Write-Host "  Installing Python $pythonVersion - this may take 2-3 minutes..." -ForegroundColor Gray
-        
         $process = Start-Process -FilePath $pythonInstaller -ArgumentList $installArgs -Wait -PassThru -NoNewWindow
         
         if ($process.ExitCode -ne 0) {
+            Write-Log "Python installation failed with exit code: $($process.ExitCode)" -Level "ERROR"
             throw "Python installation failed with exit code: $($process.ExitCode)"
         }
         
         Write-Host "  Python installed successfully" -ForegroundColor Green
+        Write-Log "Python $pythonVersion installed successfully"
         
-        # Refresh environment variables
-        Write-Host "=== Refreshing environment variables... ===" -ForegroundColor White
+        # Cleanup installer
+        Remove-Item $pythonInstaller -Force -ErrorAction SilentlyContinue
+        
+        # Refresh environment
+        Write-Host "  Refreshing environment..." -ForegroundColor Gray
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
         
-        # Wait for installation to complete
-        Start-Sleep -Seconds 3
+        Start-Sleep -Seconds 5
         
         # Find Python executable
         $pythonExe = $null
         $possiblePaths = @(
-            "C:\Program Files\Python313\python.exe",
+            "C:\Program Files\Python314\python.exe",
             "C:\Program Files\Python$($pythonVersion.Replace('.',''))\python.exe",
-            "C:\Users\$env:USERNAME\AppData\Local\Programs\Python\Python313\python.exe",
             (Get-Command python -ErrorAction SilentlyContinue).Source,
             (Get-Command py -ErrorAction SilentlyContinue).Source
         )
@@ -618,140 +898,161 @@ try {
         }
         
         if (-not $pythonExe) {
-            throw "Python installed but executable not found"
+            Write-Log "Python installed but executable not found" -Level "ERROR"
+            throw "Python installed but executable not found - Try restarting PowerShell"
         }
         
-        Write-Host "Python available at: $pythonExe" -ForegroundColor Green
+        Write-Host "  Python executable: $pythonExe" -ForegroundColor Green
+        Write-Log "Python executable found: $pythonExe"
         
-        # Verify Python works
-        $pythonVersion = & $pythonExe --version 2>&1
-        Write-Host "Python version: $pythonVersion" -ForegroundColor Green
-    }
-    else {
-        $pythonExe = $pythonCmd.Source
+        # Verify installation
+        $versionCheck = & $pythonExe --version 2>&1
+        Write-Host "  Verified: $versionCheck" -ForegroundColor Green
+        Write-Log "Python version verified: $versionCheck"
+    } else {
+        # Use existing Python
+        $pythonCommands = @("python", "py")
+        $pythonExe = $null
+        
+        foreach ($cmd in $pythonCommands) {
+            try {
+                $cmdPath = (Get-Command $cmd -ErrorAction SilentlyContinue).Source
+                if ($cmdPath -and (Test-Path $cmdPath)) {
+                    $pythonExe = $cmdPath
+                    break
+                }
+            } catch { }
+        }
     }
 
-    # --- Python confirmed installed, continue with pip + PyInstaller ---
-    Write-Host "`n=== Installing required Python packages... ===" -ForegroundColor White
-
-    # Use py.exe if available (more reliable)
+    # ================================
+    # INSTALL PIP AND PYINSTALLER
+    # ================================
+    
+    Write-Host "`n=== Installing Python packages... ===" -ForegroundColor White
+    Write-Log "Installing pip and PyInstaller"
+    
+    # Determine Python command
     $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
     if ($pyLauncher) {
         $pythonCmd = "py"
-        Write-Host "  Using py.exe launcher" -ForegroundColor Gray
     } else {
         $pythonCmd = "python"
-        Write-Host "  Using python.exe" -ForegroundColor Gray
     }
-
-    # Install pip and PyInstaller
-    Write-Host "  Installing pip..." -ForegroundColor Gray
+    
+    Write-Host "  Using: $pythonCmd" -ForegroundColor Gray
+    
+    # Upgrade pip first
+    Write-Host "  Upgrading pip..." -ForegroundColor Gray
     & $pythonCmd -m ensurepip --upgrade 2>&1 | Out-Null
-    & $pythonCmd -m pip install --upgrade pip 2>&1 | Out-Null
-
+    & $pythonCmd -m pip install --upgrade pip --no-warn-script-location 2>&1 | Out-Null
+    
+    # Install PyInstaller
     Write-Host "  Installing PyInstaller..." -ForegroundColor Gray
-    & $pythonCmd -m pip install pyinstaller 2>&1 | Out-Null
-
-    Write-Host "  Dependencies installed successfully" -ForegroundColor Green
-
-    # Get Python Scripts folder
+    $pyinstallerOutput = & $pythonCmd -m pip install pyinstaller --no-warn-script-location 2>&1
+    
+    # Check for errors
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log "PyInstaller installation failed" -Level "ERROR"
+        Write-Log "Output: $pyinstallerOutput" -Level "ERROR"
+        throw "PyInstaller installation failed"
+    }
+    
+    Write-Host "  Packages installed successfully" -ForegroundColor Green
+    Write-Log "pip and PyInstaller installed successfully"
+    
+    # Get Scripts path
     $pyScriptsPath = & $pythonCmd -c "import sysconfig; print(sysconfig.get_paths()['scripts'])" 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  PyInstaller location: $pyScriptsPath" -ForegroundColor Gray
-        
-        # Add to current session PATH
+    if ($LASTEXITCODE -eq 0 -and $pyScriptsPath) {
+        Write-Host "  Scripts directory: $pyScriptsPath" -ForegroundColor Gray
         if ($env:Path -notlike "*$pyScriptsPath*") {
             $env:Path += ";$pyScriptsPath"
         }
     }
 
-    # --- Main build logic ---
+    # ================================
+    # BUILD ACTIVE RESPONSE EXECUTABLES
+    # ================================
+    
     $targetDir = "C:\Program Files (x86)\ossec-agent\active-response"
     $binDir    = "$targetDir\bin"
-    $buildDir  = "$env:TEMP\CyberSentinel-Build"
+    $buildDir  = "$env:TEMP\CyberSentinel-Build-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 
-    # Prepare directories
+    Write-Host "`n=== Building Active Response executables... ===" -ForegroundColor White
+    Write-Log "Starting executable build process"
+    
+    # Create directories
     if (!(Test-Path $binDir)) { 
         New-Item -ItemType Directory -Path $binDir -Force | Out-Null 
-        Write-Host "`nCreated directory: $binDir" -ForegroundColor Green
+        Write-Log "Created bin directory: $binDir"
     }
+    
     if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
     New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
+    Write-Log "Created build directory: $buildDir"
 
     # Download Python scripts
-    Write-Host "`n=== Downloading Python scripts... ===" -ForegroundColor White
+    Write-Host "  Downloading source scripts..." -ForegroundColor Gray
     $removeThreatUrl  = "https://raw.githubusercontent.com/effaaykhan/VirusTotal-Integration-with-Wazuh/refs/heads/main/remove-threat.py"
     $removeMalwareUrl = "https://raw.githubusercontent.com/effaaykhan/VirusTotal-Integration-with-Wazuh/refs/heads/main/remove-malware.py"
 
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Write-Host "  Downloading remove-threat.py..." -ForegroundColor Gray
         Invoke-WebRequest -Uri $removeThreatUrl -OutFile "$buildDir\remove-threat.py" -UseBasicParsing
-        Write-Host "  Downloading remove-malware.py..." -ForegroundColor Gray
         Invoke-WebRequest -Uri $removeMalwareUrl -OutFile "$buildDir\remove-malware.py" -UseBasicParsing
-        Write-Host "  Scripts downloaded successfully" -ForegroundColor Green
+        Write-Host "  Scripts downloaded" -ForegroundColor Green
+        Write-Log "Source scripts downloaded successfully"
     }
     catch {
-        throw "Failed to download scripts: $_"
+        Write-Log "Failed to download scripts: $($_.Exception.Message)" -Level "ERROR"
+        throw "Failed to download Active Response scripts"
     }
 
-    # Compile with pyinstaller
-    Write-Host "`n=== Compiling executables... ===" -ForegroundColor White
-
-    Write-Host "  Compiling remove-threat.py..." -ForegroundColor Gray
-    & $pythonCmd -m PyInstaller -F "$buildDir\remove-threat.py" --distpath "$buildDir\dist" --workpath "$buildDir\build" --clean --log-level ERROR 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { 
-        throw "remove-threat.py compilation failed!"
+    # Compile executables
+    Write-Host "  Compiling remove-threat.exe..." -ForegroundColor Gray
+    $compileOutput = & $pythonCmd -m PyInstaller -F "$buildDir\remove-threat.py" --distpath "$buildDir\dist" --workpath "$buildDir\build" --clean --log-level ERROR 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log "remove-threat.py compilation failed" -Level "ERROR"
+        Write-Log "Output: $compileOutput" -Level "ERROR"
+        throw "remove-threat.py compilation failed"
     }
     Write-Host "  remove-threat.exe compiled" -ForegroundColor Green
+    Write-Log "remove-threat.exe compiled successfully"
 
-    Write-Host "  Compiling remove-malware.py..." -ForegroundColor Gray
-    & $pythonCmd -m PyInstaller -F "$buildDir\remove-malware.py" --distpath "$buildDir\dist" --workpath "$buildDir\build" --clean --log-level ERROR 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { 
-        throw "remove-malware.py compilation failed!"
+    Write-Host "  Compiling remove-malware.exe..." -ForegroundColor Gray
+    $compileOutput = & $pythonCmd -m PyInstaller -F "$buildDir\remove-malware.py" --distpath "$buildDir\dist" --workpath "$buildDir\build" --clean --log-level ERROR 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log "remove-malware.py compilation failed" -Level "ERROR"
+        Write-Log "Output: $compileOutput" -Level "ERROR"
+        throw "remove-malware.py compilation failed"
     }
     Write-Host "  remove-malware.exe compiled" -ForegroundColor Green
+    Write-Log "remove-malware.exe compiled successfully"
 
     # Deploy executables
-    Write-Host "`n=== Deploying executables... ===" -ForegroundColor White
+    Write-Host "  Deploying executables..." -ForegroundColor Gray
     try {
         Move-Item -Path "$buildDir\dist\remove-threat.exe" -Destination $binDir -Force
         Move-Item -Path "$buildDir\dist\remove-malware.exe" -Destination $binDir -Force
         Write-Host "  Executables deployed to $binDir" -ForegroundColor Green
+        Write-Log "Executables deployed successfully"
     }
     catch {
-        throw "Failed to deploy executables: $_"
+        Write-Log "Failed to deploy executables: $($_.Exception.Message)" -Level "ERROR"
+        throw "Failed to deploy executables"
     }
 
     # Cleanup build directory
-    Remove-Item -Recurse -Force $buildDir
+    Remove-Item -Recurse -Force $buildDir -ErrorAction SilentlyContinue
+    Write-Log "Build directory cleaned up"
 
-    # Start CyberSentinel service
-    Write-Host "`n=== Starting CyberSentinel service... ===" -ForegroundColor White
-    try {
-        Start-Service -Name "CyberSentinel" -ErrorAction Stop
-        Write-Host "  CyberSentinel service started" -ForegroundColor Green
-    }
-    catch {
-        Write-Warning "  CyberSentinel service not found or failed to start"
-    }
-
-    Write-Host ""
-    Write-Host "[PHASE 2.1] Complete - Active response tools built and deployed" -ForegroundColor Green
-    Write-Host ""
-
-    # =============================================================================
-    # PHASE 2.2: VERIFY DEPLOYMENT
-    # =============================================================================
-
-    Write-Host "[PHASE 2.2] Verifying deployment..." -ForegroundColor Yellow
-    Write-Host ""
-
-    $requiredFiles = @(
-        "remove-malware.exe",
-        "remove-threat.exe"
-    )
-
+    # ================================
+    # VERIFY DEPLOYMENT
+    # ================================
+    
+    Write-Host "`n=== Verifying deployment... ===" -ForegroundColor White
+    
+    $requiredFiles = @("remove-malware.exe", "remove-threat.exe")
     $allFilesPresent = $true
     $missingFiles = @()
 
@@ -760,325 +1061,49 @@ try {
         if (Test-Path $filePath) {
             $fileSize = (Get-Item $filePath).Length
             Write-Host "  [OK] $file - $([math]::Round($fileSize/1KB, 2)) KB" -ForegroundColor Green
+            Write-Log "Verified: $file - $([math]::Round($fileSize/1KB, 2)) KB"
         }
         else {
             Write-Host "  [MISSING] $file" -ForegroundColor Red
+            Write-Log "Missing file: $file" -Level "ERROR"
             $allFilesPresent = $false
             $missingFiles += $file
         }
     }
 
-    Write-Host ""
-
     if (-not $allFilesPresent) {
-        throw "Deployment verification failed! Missing files: $($missingFiles -join ', ')"
+        throw "Deployment verification failed - Missing: $($missingFiles -join ', ')"
     }
 
-    Write-Host "[PHASE 2.2] Complete - Required executables verified" -ForegroundColor Green
-    Write-Host ""
+    Write-Host "  All executables verified" -ForegroundColor Green
+    Write-Log "All executables verified successfully"
 
-    # =============================================================================
-    # PHASE 2.3: REMOVE PYTHON COMPLETELY
-    # =============================================================================
+    # ================================
+    # CLEANUP PYTHON (OPTIONAL)
+    # ================================
+    
+    Write-Host "`n=== Cleaning up Python installation... ===" -ForegroundColor White
+    Write-Log "Starting Python cleanup"
+    
+    Remove-PythonCompletely
+    
+    Write-Host "  Python cleanup complete" -ForegroundColor Green
+    Write-Log "Python cleanup completed"
 
-    Write-Host "[PHASE 2.3] Removing Python installation..." -ForegroundColor Yellow
-    Write-Host ""
-
-    # Stop any Python processes first
-    Write-Host "=== Stopping Python processes... ===" -ForegroundColor White
-    $pythonProcesses = Get-Process | Where-Object { $_.ProcessName -like "*python*" }
-    if ($pythonProcesses) {
-        foreach ($proc in $pythonProcesses) {
-            Write-Host "  Stopping: $($proc.ProcessName) - PID: $($proc.Id)" -ForegroundColor Gray
-            try {
-                Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-                Write-Host "  Stopped" -ForegroundColor Green
-            }
-            catch {
-                Write-Host "  Could not stop process" -ForegroundColor Yellow
-            }
-        }
+    # ================================
+    # START SERVICE
+    # ================================
+    
+    Write-Host "`n=== Starting CyberSentinel service... ===" -ForegroundColor White
+    try {
+        Start-Service -Name "CyberSentinel" -ErrorAction Stop
+        Write-Host "  Service started" -ForegroundColor Green
+        Write-Log "CyberSentinel service started"
     }
-    else {
-        Write-Host "  No Python processes running" -ForegroundColor Gray
+    catch {
+        Write-Host "  Service not found or already running" -ForegroundColor Yellow
+        Write-Log "CyberSentinel service start: $($_.Exception.Message)" -Level "WARNING"
     }
-
-    Start-Sleep -Seconds 2
-
-    # Method 1: Uninstall via Registry
-    Write-Host "`n=== Searching for Python in registry... ===" -ForegroundColor White
-
-    $uninstallPaths = @(
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
-        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
-    )
-
-    $pythonInstalls = @()
-
-    foreach ($path in $uninstallPaths) {
-        if (Test-Path $path) {
-            Get-ChildItem $path | ForEach-Object {
-                $app = Get-ItemProperty $_.PSPath
-                if ($app.DisplayName -like "*Python*") {
-                    $pythonInstalls += $app
-                }
-            }
-        }
-    }
-
-    if ($pythonInstalls.Count -gt 0) {
-        foreach ($install in $pythonInstalls) {
-            $name = $install.DisplayName
-            $uninstallString = $install.UninstallString
-            
-            if ($uninstallString) {
-                Write-Host "  Found: $name" -ForegroundColor Gray
-                
-                $uninstalled = $false
-                
-                if ($uninstallString -match "msiexec") {
-                    Write-Host "  Trying standard MSI uninstall..." -ForegroundColor Gray
-                    $extractedGuid = $uninstallString -replace '.*(\{[A-F0-9-]+\}).*', '$1'
-                    $result = Start-Process "msiexec.exe" -ArgumentList "/x $extractedGuid /qn /norestart" -Wait -NoNewWindow -PassThru
-                    if ($result.ExitCode -eq 0) {
-                        Write-Host "  Success" -ForegroundColor Green
-                        $uninstalled = $true
-                    }
-                }
-                
-                if (-not $uninstalled -and $uninstallString -match "msiexec") {
-                    Write-Host "  Trying alternate MSI method..." -ForegroundColor Gray
-                    $extractedGuid = $uninstallString -replace '.*(\{[A-F0-9-]+\}).*', '$1'
-                    $result = Start-Process "msiexec.exe" -ArgumentList "/x $extractedGuid /quiet /norestart" -Wait -NoNewWindow -PassThru
-                    if ($result.ExitCode -eq 0) {
-                        Write-Host "  Success" -ForegroundColor Green
-                        $uninstalled = $true
-                    }
-                }
-                
-                if (-not $uninstalled -and $uninstallString -match '"(.+?)"') {
-                    Write-Host "  Trying direct uninstaller..." -ForegroundColor Gray
-                    $exe = $matches[1]
-                    if (Test-Path $exe) {
-                        $result = Start-Process $exe -ArgumentList "/uninstall /quiet" -Wait -NoNewWindow -PassThru -ErrorAction SilentlyContinue
-                        if ($result.ExitCode -eq 0) {
-                            Write-Host "  Success" -ForegroundColor Green
-                            $uninstalled = $true
-                        }
-                    }
-                }
-                
-                if (-not $uninstalled) {
-                    Write-Host "  Could not uninstall via MSI - will remove manually" -ForegroundColor Yellow
-                }
-            }
-        }
-    }
-    else {
-        Write-Host "  No Python found in registry" -ForegroundColor Gray
-    }
-
-    # Method 2: Remove Microsoft Store Python
-    Write-Host "`n=== Checking for Microsoft Store Python... ===" -ForegroundColor White
-    $storeApps = Get-AppxPackage | Where-Object { $_.Name -like "*Python*" }
-    if ($storeApps) {
-        foreach ($app in $storeApps) {
-            Write-Host "  Removing: $($app.Name)" -ForegroundColor Gray
-            try {
-                Remove-AppxPackage -Package $app.PackageFullName -ErrorAction Stop
-                Write-Host "  Success" -ForegroundColor Green
-            }
-            catch {
-                Write-Host "  Warning: $($_.Exception.Message)" -ForegroundColor Yellow
-            }
-        }
-    }
-    else {
-        Write-Host "  No Microsoft Store Python found" -ForegroundColor Gray
-    }
-
-    # Method 3: Force remove directories
-    Write-Host "`n=== Force removing Python directories... ===" -ForegroundColor White
-
-    $dirsToCheck = @(
-        "$env:LOCALAPPDATA\Programs\Python*",
-        "$env:LOCALAPPDATA\Python*",
-        "$env:APPDATA\Python",
-        "$env:ProgramFiles\Python*",
-        "${env:ProgramFiles(x86)}\Python*",
-        "C:\Python*"
-    )
-
-    $removed = $false
-    foreach ($pattern in $dirsToCheck) {
-        $dirs = Get-Item $pattern -ErrorAction SilentlyContinue
-        if ($dirs) {
-            foreach ($dir in $dirs) {
-                Write-Host "  Removing: $($dir.FullName)" -ForegroundColor Gray
-                
-                try {
-                    takeown /f "$($dir.FullName)" /r /d y 2>&1 | Out-Null
-                    icacls "$($dir.FullName)" /grant administrators:F /t 2>&1 | Out-Null
-                }
-                catch {
-                    # Ignore ownership errors
-                }
-                
-                try {
-                    Remove-Item $dir.FullName -Recurse -Force -ErrorAction Stop
-                    Write-Host "  Success" -ForegroundColor Green
-                    $removed = $true
-                }
-                catch {
-                    Write-Host "  Warning: Some files may be locked" -ForegroundColor Yellow
-                    Get-ChildItem $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                        Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-                    }
-                }
-            }
-        }
-    }
-
-    if (-not $removed) {
-        Write-Host "  No directories found" -ForegroundColor Gray
-    }
-
-    # Method 4: Clean PATH
-    Write-Host "`n=== Cleaning PATH variables... ===" -ForegroundColor White
-    $pathChanged = $false
-
-    foreach ($scope in @("User", "Machine")) {
-        try {
-            $currentPath = [Environment]::GetEnvironmentVariable("Path", $scope)
-            if ($currentPath) {
-                $pathArray = $currentPath -split ';'
-                $newPathArray = @()
-                
-                foreach ($p in $pathArray) {
-                    if ($p -notlike "*Python*" -and $p -notlike "*\Scripts" -and $p -ne "") {
-                        $newPathArray += $p
-                    }
-                }
-                
-                if ($pathArray.Count -ne $newPathArray.Count) {
-                    $newPath = $newPathArray -join ';'
-                    [Environment]::SetEnvironmentVariable("Path", $newPath, $scope)
-                    Write-Host "  Cleaned $scope PATH" -ForegroundColor Green
-                    $pathChanged = $true
-                }
-            }
-        }
-        catch {
-            Write-Host "  Warning cleaning $scope PATH: $($_.Exception.Message)" -ForegroundColor Yellow
-        }
-    }
-
-    if (-not $pathChanged) {
-        Write-Host "  PATH already clean" -ForegroundColor Gray
-    }
-
-    # Method 5: Remove pip cache
-    Write-Host "`n=== Cleaning pip cache... ===" -ForegroundColor White
-    $pipDirs = @(
-        "$env:LOCALAPPDATA\pip",
-        "$env:APPDATA\pip"
-    )
-
-    $cleaned = $false
-    foreach ($dir in $pipDirs) {
-        if (Test-Path $dir) {
-            try {
-                Remove-Item $dir -Recurse -Force -ErrorAction Stop
-                Write-Host "  Removed $dir" -ForegroundColor Green
-                $cleaned = $true
-            }
-            catch {
-                Write-Host "  Warning: $($_.Exception.Message)" -ForegroundColor Yellow
-            }
-        }
-    }
-
-    if (-not $cleaned) {
-        Write-Host "  No pip cache found" -ForegroundColor Gray
-    }
-
-    # Method 6: Clean registry
-    Write-Host "`n=== Cleaning registry... ===" -ForegroundColor White
-    $regKeys = @(
-        "HKCU:\Software\Python",
-        "HKLM:\Software\Python",
-        "HKLM:\Software\WOW6432Node\Python"
-    )
-
-    $regCleaned = $false
-    foreach ($key in $regKeys) {
-        if (Test-Path $key) {
-            try {
-                Remove-Item $key -Recurse -Force -ErrorAction Stop
-                Write-Host "  Removed $key" -ForegroundColor Green
-                $regCleaned = $true
-            }
-            catch {
-                Write-Host "  Warning: $($_.Exception.Message)" -ForegroundColor Yellow
-            }
-        }
-    }
-
-    foreach ($path in $uninstallPaths) {
-        if (Test-Path $path) {
-            Get-ChildItem $path | ForEach-Object {
-                $app = Get-ItemProperty $_.PSPath
-                if ($app.DisplayName -like "*Python*") {
-                    try {
-                        Remove-Item $_.PSPath -Recurse -Force -ErrorAction Stop
-                        Write-Host "  Removed installer key: $($app.DisplayName)" -ForegroundColor Green
-                        $regCleaned = $true
-                    }
-                    catch {
-                        # Ignore
-                    }
-                }
-            }
-        }
-    }
-
-    if (-not $regCleaned) {
-        Write-Host "  No Python registry keys found" -ForegroundColor Gray
-    }
-
-    # Method 7: Remove file associations
-    Write-Host "`n=== Cleaning file associations... ===" -ForegroundColor White
-    $assocKeys = @(
-        "HKCU:\Software\Classes\.py",
-        "HKCU:\Software\Classes\.pyw",
-        "HKCU:\Software\Classes\.pyc",
-        "HKCU:\Software\Classes\Python.File",
-        "HKCU:\Software\Classes\Python.NoConFile",
-        "HKCU:\Software\Classes\Python.CompiledFile"
-    )
-
-    $assocCleaned = $false
-    foreach ($key in $assocKeys) {
-        if (Test-Path $key) {
-            try {
-                Remove-Item $key -Recurse -Force -ErrorAction Stop
-                Write-Host "  Removed association: $key" -ForegroundColor Green
-                $assocCleaned = $true
-            }
-            catch {
-                # Ignore
-            }
-        }
-    }
-
-    if (-not $assocCleaned) {
-        Write-Host "  No file associations found" -ForegroundColor Gray
-    }
-
-    Write-Host ""
-    Write-Host "[PHASE 2.3] Complete - Python removed successfully" -ForegroundColor Green
-    Write-Host ""
 
     Write-Log "Phase 2: Active Response setup completed successfully" -Level "SUCCESS"
 
@@ -1103,9 +1128,9 @@ catch {
     exit 1
 }
 
-# =============================================================================
+# ================================
 # FINAL SUCCESS SUMMARY
-# =============================================================================
+# ================================
 
 Clear-Host
 Write-Host ""
@@ -1148,4 +1173,7 @@ Write-Host ""
 Write-Host "  IMPORTANT: Please restart your computer for all changes to take effect!" -ForegroundColor Yellow
 Write-Host ""
 Write-Host ""
+
+Write-Log "Complete installation finished successfully" -Level "SUCCESS"
+
 Read-Host "Press Enter to exit"
