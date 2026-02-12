@@ -618,102 +618,45 @@ catch {
 # Compile with pyinstaller
 Write-Host "`n=== Compiling executables... ===" -ForegroundColor White
 
-# Create a temporary user context script to run PyInstaller without admin privileges
-$compileScript = @"
-`$ErrorActionPreference = 'Stop'
-Set-Location '$buildDir'
+Write-Host "  Compiling remove-threat.py..." -ForegroundColor Gray
 
-# Compile remove-threat.py
-Write-Host '  Compiling remove-threat.py...' -ForegroundColor Gray
-& '$pythonCmd' -m PyInstaller -F 'remove-threat.py' --distpath 'dist' --workpath 'build' --clean --log-level ERROR 2>&1 | Out-Null
-if (`$LASTEXITCODE -ne 0) { 
-    Write-Error 'remove-threat.py compilation failed!'
-    exit 1 
-}
-Write-Host '  remove-threat.exe compiled' -ForegroundColor Green
+# Capture full output for debugging
+$pyinstallerOutput = & $pythonCmd -m PyInstaller -F "$buildDir\remove-threat.py" --distpath "$buildDir\dist" --workpath "$buildDir\build" --clean 2>&1
 
-# Compile remove-malware.py
-Write-Host '  Compiling remove-malware.py...' -ForegroundColor Gray
-& '$pythonCmd' -m PyInstaller -F 'remove-malware.py' --distpath 'dist' --workpath 'build' --clean --log-level ERROR 2>&1 | Out-Null
-if (`$LASTEXITCODE -ne 0) { 
-    Write-Error 'remove-malware.py compilation failed!'
-    exit 1 
-}
-Write-Host '  remove-malware.exe compiled' -ForegroundColor Green
+# Filter out just the admin warning
+$filteredOutput = $pyinstallerOutput | Where-Object { $_ -notmatch "DEPRECATION.*admin" }
 
-exit 0
-"@
-
-$tempScriptPath = "$env:TEMP\compile-pyinstaller.ps1"
-Set-Content -Path $tempScriptPath -Value $compileScript -Encoding UTF8
-
-# Run compilation as current user (non-admin) using RunAs
-try {
-    # Get current user
-    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    
-    # Run the script in a non-elevated process
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = "powershell.exe"
-    $psi.Arguments = "-ExecutionPolicy Bypass -File `"$tempScriptPath`""
-    $psi.WorkingDirectory = $buildDir
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
-    
-    # Don't run as admin - this drops privileges
-    $psi.Verb = ""
-    
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $psi
-    $process.Start() | Out-Null
-    
-    # Capture and display output in real-time
-    while (!$process.HasExited) {
-        if (!$process.StandardOutput.EndOfStream) {
-            $line = $process.StandardOutput.ReadLine()
-            if ($line) { Write-Host $line }
-        }
-        Start-Sleep -Milliseconds 100
-    }
-    
-    # Get any remaining output
-    $output = $process.StandardOutput.ReadToEnd()
-    $errors = $process.StandardError.ReadToEnd()
-    
-    if ($output) { Write-Host $output }
-    if ($errors -and $errors -notlike "*DEPRECATION*") { 
-        Write-Host $errors -ForegroundColor Yellow 
-    }
-    
-    $process.WaitForExit()
-    
-    if ($process.ExitCode -ne 0) {
-        throw "PyInstaller compilation failed with exit code: $($process.ExitCode)"
-    }
-}
-catch {
-    Write-Error "Compilation failed: $_"
+# Check if compilation actually succeeded by looking for the exe
+if (Test-Path "$buildDir\dist\remove-threat.exe") {
+    Write-Host "  remove-threat.exe compiled successfully" -ForegroundColor Green
+} else {
+    Write-Host "`n  Compilation failed. Full output:" -ForegroundColor Red
+    $pyinstallerOutput | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
+    Write-Log "PyInstaller output: $($pyinstallerOutput -join "`n")" -Level "ERROR"
+    Write-Error "remove-threat.py compilation failed!"
     exit 1
 }
-finally {
-    # Cleanup temp script
-    Remove-Item -Path $tempScriptPath -Force -ErrorAction SilentlyContinue
-}
 
-# Verify compiled files exist
-if (-not (Test-Path "$buildDir\dist\remove-threat.exe")) {
-    Write-Error "remove-threat.exe was not created!"
-    exit 1
-}
-if (-not (Test-Path "$buildDir\dist\remove-malware.exe")) {
-    Write-Error "remove-malware.exe was not created!"
+Write-Host "  Compiling remove-malware.py..." -ForegroundColor Gray
+
+# Capture full output for debugging
+$pyinstallerOutput = & $pythonCmd -m PyInstaller -F "$buildDir\remove-malware.py" --distpath "$buildDir\dist" --workpath "$buildDir\build" --clean 2>&1
+
+# Filter out just the admin warning
+$filteredOutput = $pyinstallerOutput | Where-Object { $_ -notmatch "DEPRECATION.*admin" }
+
+# Check if compilation actually succeeded by looking for the exe
+if (Test-Path "$buildDir\dist\remove-malware.exe") {
+    Write-Host "  remove-malware.exe compiled successfully" -ForegroundColor Green
+} else {
+    Write-Host "`n  Compilation failed. Full output:" -ForegroundColor Red
+    $pyinstallerOutput | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
+    Write-Log "PyInstaller output: $($pyinstallerOutput -join "`n")" -Level "ERROR"
+    Write-Error "remove-malware.py compilation failed!"
     exit 1
 }
 
 Write-Host "`n  Both executables compiled successfully" -ForegroundColor Green
-
 # Deploy executables
 Write-Host "`n=== Deploying executables... ===" -ForegroundColor White
 try {
