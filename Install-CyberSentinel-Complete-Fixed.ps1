@@ -1,7 +1,7 @@
 # ================================
 # CyberSentinel Complete Installation Script
 # Agent + Active Response
-# Version 2.0 - SSL Error Fixed
+# Version 3.0 - PyInstaller Admin Privilege Fix
 # ================================
 
 # ================================
@@ -427,6 +427,92 @@ function Install-PythonPackageWithRetry {
     return $false
 }
 
+function Invoke-PyInstallerAsUser {
+    param(
+        [string]$PythonCmd,
+        [string]$ScriptPath,
+        [string]$OutputDir,
+        [string]$BuildDir
+    )
+    
+    Write-Log "Compiling as regular user: $ScriptPath"
+    
+    # Create a temporary PowerShell script to run PyInstaller
+    $tempScript = "$env:TEMP\run-pyinstaller-$(Get-Random).ps1"
+    
+    $scriptContent = @"
+Set-Location '$BuildDir'
+& '$PythonCmd' -m PyInstaller -F '$ScriptPath' --distpath '$OutputDir' --workpath '$BuildDir\build' --clean --log-level ERROR
+exit `$LASTEXITCODE
+"@
+    
+    Set-Content -Path $tempScript -Value $scriptContent -Encoding UTF8
+    Write-Log "Created temp script: $tempScript"
+    
+    # Get current user
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    Write-Log "Current user: $currentUser"
+    
+    # Run as current user but without elevation using a scheduled task
+    $taskName = "CyberSentinel-PyInstaller-$(Get-Random)"
+    
+    try {
+        Write-Log "Creating scheduled task: $taskName"
+        
+        # Create task to run immediately as current user without elevation
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -NoProfile -File `"$tempScript`""
+        $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+        
+        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+        Write-Log "Task registered successfully"
+        
+        # Run the task
+        Write-Log "Starting task"
+        Start-ScheduledTask -TaskName $taskName
+        
+        # Wait for completion with timeout
+        $timeout = 300 # 5 minutes
+        $elapsed = 0
+        $sleepInterval = 2
+        
+        while ($elapsed -lt $timeout) {
+            $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName
+            $state = (Get-ScheduledTask -TaskName $taskName).State
+            
+            if ($state -eq 'Ready') {
+                Write-Log "Task completed"
+                
+                # Get the exit code
+                $exitCode = $taskInfo.LastTaskResult
+                Write-Log "Task exit code: $exitCode"
+                
+                # Cleanup
+                Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+                Remove-Item -Path $tempScript -Force -ErrorAction SilentlyContinue
+                
+                return $exitCode
+            }
+            
+            Start-Sleep -Seconds $sleepInterval
+            $elapsed += $sleepInterval
+        }
+        
+        # Timeout
+        Write-Log "Task timeout after $timeout seconds" -Level "ERROR"
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        Remove-Item -Path $tempScript -Force -ErrorAction SilentlyContinue
+        return 1
+        
+    } catch {
+        Write-Log "Scheduled task error: $($_.Exception.Message)" -Level "ERROR"
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        Remove-Item -Path $tempScript -Force -ErrorAction SilentlyContinue
+        return 1
+    }
+}
+
 # ================================
 # CHECK ADMINISTRATOR PRIVILEGES
 # ================================
@@ -441,11 +527,11 @@ Clear-Host
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "   CyberSentinel Complete Installation  " -ForegroundColor Cyan
 Write-Host "   Agent + Active Response Setup        " -ForegroundColor Cyan
-Write-Host "   Version 2.0 - SSL Error Fixed        " -ForegroundColor Cyan
+Write-Host "   Version 3.0 - PyInstaller Fix        " -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-Write-Log "Complete installation started (Version 2.0)"
+Write-Log "Complete installation started (Version 3.0)"
 Write-Log "Log file: $logFile"
 
 # ================================
@@ -1130,7 +1216,7 @@ try {
     Write-Host "`n=== Building Active Response executables... ===" -ForegroundColor White
     Write-Log "Starting executable build process"
     
-    # Create directories
+    # Create directories (with admin privileges)
     if (!(Test-Path $binDir)) { 
         New-Item -ItemType Directory -Path $binDir -Force | Out-Null 
         Write-Log "Created bin directory: $binDir"
@@ -1139,6 +1225,10 @@ try {
     if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
     New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
     Write-Log "Created build directory: $buildDir"
+    
+    # Create dist directory
+    $distDir = "$buildDir\dist"
+    New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
     # Download Python scripts
     Write-Host "  Downloading source scripts..." -ForegroundColor Gray
@@ -1157,32 +1247,57 @@ try {
         throw "Failed to download Active Response scripts"
     }
 
-    # Compile executables
+    # ================================
+    # COMPILE EXECUTABLES AS REGULAR USER
+    # ================================
+    
+    Write-Host "  Compiling executables (without admin privileges)..." -ForegroundColor Cyan
+    Write-Log "Compiling executables using scheduled task (no admin)"
+    
+    # Compile remove-threat.exe
     Write-Host "  Compiling remove-threat.exe..." -ForegroundColor Gray
-    $compileOutput = & $pythonCmd -m PyInstaller -F "$buildDir\remove-threat.py" --distpath "$buildDir\dist" --workpath "$buildDir\build" --clean --log-level ERROR 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log "remove-threat.py compilation failed" -Level "ERROR"
-        Write-Log "Output: $compileOutput" -Level "ERROR"
+    $exitCode = Invoke-PyInstallerAsUser -PythonCmd $pythonCmd -ScriptPath "$buildDir\remove-threat.py" -OutputDir $distDir -BuildDir $buildDir
+    
+    if ($exitCode -ne 0) {
+        Write-Log "remove-threat.py compilation failed with exit code: $exitCode" -Level "ERROR"
         throw "remove-threat.py compilation failed"
     }
+    
+    # Verify the executable was created
+    if (-not (Test-Path "$distDir\remove-threat.exe")) {
+        Write-Log "remove-threat.exe was not created" -Level "ERROR"
+        throw "remove-threat.exe compilation failed - output file not found"
+    }
+    
     Write-Host "  remove-threat.exe compiled" -ForegroundColor Green
     Write-Log "remove-threat.exe compiled successfully"
 
+    # Compile remove-malware.exe
     Write-Host "  Compiling remove-malware.exe..." -ForegroundColor Gray
-    $compileOutput = & $pythonCmd -m PyInstaller -F "$buildDir\remove-malware.py" --distpath "$buildDir\dist" --workpath "$buildDir\build" --clean --log-level ERROR 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log "remove-malware.py compilation failed" -Level "ERROR"
-        Write-Log "Output: $compileOutput" -Level "ERROR"
+    $exitCode = Invoke-PyInstallerAsUser -PythonCmd $pythonCmd -ScriptPath "$buildDir\remove-malware.py" -OutputDir $distDir -BuildDir $buildDir
+    
+    if ($exitCode -ne 0) {
+        Write-Log "remove-malware.py compilation failed with exit code: $exitCode" -Level "ERROR"
         throw "remove-malware.py compilation failed"
     }
+    
+    # Verify the executable was created
+    if (-not (Test-Path "$distDir\remove-malware.exe")) {
+        Write-Log "remove-malware.exe was not created" -Level "ERROR"
+        throw "remove-malware.exe compilation failed - output file not found"
+    }
+    
     Write-Host "  remove-malware.exe compiled" -ForegroundColor Green
     Write-Log "remove-malware.exe compiled successfully"
 
-    # Deploy executables
-    Write-Host "  Deploying executables..." -ForegroundColor Gray
+    # ================================
+    # DEPLOY EXECUTABLES (WITH ADMIN PRIVILEGES)
+    # ================================
+    
+    Write-Host "  Deploying executables (with admin privileges)..." -ForegroundColor Gray
     try {
-        Move-Item -Path "$buildDir\dist\remove-threat.exe" -Destination $binDir -Force
-        Move-Item -Path "$buildDir\dist\remove-malware.exe" -Destination $binDir -Force
+        Copy-Item -Path "$distDir\remove-threat.exe" -Destination $binDir -Force
+        Copy-Item -Path "$distDir\remove-malware.exe" -Destination $binDir -Force
         Write-Host "  Executables deployed to $binDir" -ForegroundColor Green
         Write-Log "Executables deployed successfully"
     }
