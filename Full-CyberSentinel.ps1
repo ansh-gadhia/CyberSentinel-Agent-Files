@@ -618,45 +618,57 @@ catch {
 # Compile with pyinstaller
 Write-Host "`n=== Compiling executables... ===" -ForegroundColor White
 
-Write-Host "  Compiling remove-threat.py..." -ForegroundColor Gray
+# Temporarily allow PyInstaller to run despite warnings
+$originalErrorPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 
-# Capture full output for debugging
-$pyinstallerOutput = & $pythonCmd -m PyInstaller -F "$buildDir\remove-threat.py" --distpath "$buildDir\dist" --workpath "$buildDir\build" --clean 2>&1
+try {
+    Write-Host "  Compiling remove-threat.py..." -ForegroundColor Gray
+    
+    # Run PyInstaller and capture output
+    $output = & $pythonCmd -m PyInstaller -F "$buildDir\remove-threat.py" --distpath "$buildDir\dist" --workpath "$buildDir\build" --clean --log-level WARN 2>&1
+    
+    # Check if exe was created (ignore admin warning)
+    if (Test-Path "$buildDir\dist\remove-threat.exe") {
+        Write-Host "  remove-threat.exe compiled" -ForegroundColor Green
+    } else {
+        # Show actual errors (not admin warning)
+        $realErrors = $output | Where-Object { $_ -notmatch "DEPRECATION.*admin" }
+        if ($realErrors) {
+            Write-Host "`n  Compilation errors:" -ForegroundColor Red
+            $realErrors | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
+        }
+        throw "remove-threat.exe was not created"
+    }
 
-# Filter out just the admin warning
-$filteredOutput = $pyinstallerOutput | Where-Object { $_ -notmatch "DEPRECATION.*admin" }
-
-# Check if compilation actually succeeded by looking for the exe
-if (Test-Path "$buildDir\dist\remove-threat.exe") {
-    Write-Host "  remove-threat.exe compiled successfully" -ForegroundColor Green
-} else {
-    Write-Host "`n  Compilation failed. Full output:" -ForegroundColor Red
-    $pyinstallerOutput | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
-    Write-Log "PyInstaller output: $($pyinstallerOutput -join "`n")" -Level "ERROR"
-    Write-Error "remove-threat.py compilation failed!"
+    Write-Host "  Compiling remove-malware.py..." -ForegroundColor Gray
+    
+    # Run PyInstaller and capture output
+    $output = & $pythonCmd -m PyInstaller -F "$buildDir\remove-malware.py" --distpath "$buildDir\dist" --workpath "$buildDir\build" --clean --log-level WARN 2>&1
+    
+    # Check if exe was created (ignore admin warning)
+    if (Test-Path "$buildDir\dist\remove-malware.exe") {
+        Write-Host "  remove-malware.exe compiled" -ForegroundColor Green
+    } else {
+        # Show actual errors (not admin warning)
+        $realErrors = $output | Where-Object { $_ -notmatch "DEPRECATION.*admin" }
+        if ($realErrors) {
+            Write-Host "`n  Compilation errors:" -ForegroundColor Red
+            $realErrors | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
+        }
+        throw "remove-malware.exe was not created"
+    }
+    
+    Write-Host "`n  Both executables compiled successfully" -ForegroundColor Green
+}
+catch {
+    Write-Error "PyInstaller compilation failed: $_"
     exit 1
 }
-
-Write-Host "  Compiling remove-malware.py..." -ForegroundColor Gray
-
-# Capture full output for debugging
-$pyinstallerOutput = & $pythonCmd -m PyInstaller -F "$buildDir\remove-malware.py" --distpath "$buildDir\dist" --workpath "$buildDir\build" --clean 2>&1
-
-# Filter out just the admin warning
-$filteredOutput = $pyinstallerOutput | Where-Object { $_ -notmatch "DEPRECATION.*admin" }
-
-# Check if compilation actually succeeded by looking for the exe
-if (Test-Path "$buildDir\dist\remove-malware.exe") {
-    Write-Host "  remove-malware.exe compiled successfully" -ForegroundColor Green
-} else {
-    Write-Host "`n  Compilation failed. Full output:" -ForegroundColor Red
-    $pyinstallerOutput | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
-    Write-Log "PyInstaller output: $($pyinstallerOutput -join "`n")" -Level "ERROR"
-    Write-Error "remove-malware.py compilation failed!"
-    exit 1
+finally {
+    # Restore original error preference
+    $ErrorActionPreference = $originalErrorPreference
 }
-
-Write-Host "`n  Both executables compiled successfully" -ForegroundColor Green
 # Deploy executables
 Write-Host "`n=== Deploying executables... ===" -ForegroundColor White
 try {
