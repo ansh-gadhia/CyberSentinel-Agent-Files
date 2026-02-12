@@ -550,26 +550,39 @@ if ($pyLauncher) {
     Write-Host "  Using python.exe" -ForegroundColor Gray
 }
 
-# Install pip and PyInstaller
 Write-Host "  Installing pip..." -ForegroundColor Gray
 & $pythonCmd -m ensurepip --upgrade 2>&1 | Out-Null
-& $pythonCmd -m pip install --upgrade pip 2>&1 | Out-Null
 
-Write-Host "  Installing PyInstaller..." -ForegroundColor Gray
-& $pythonCmd -m pip install pyinstaller 2>&1 | Out-Null
+# Upgrade pip first
+Write-Host "  Upgrading pip..." -ForegroundColor Gray
+& $pythonCmd -m pip install --upgrade pip --quiet --disable-pip-version-check 2>&1 | Out-Null
 
-Write-Host "  Dependencies installed successfully" -ForegroundColor Green
-
-# Get Python Scripts folder (where pyinstaller.exe is installed)
+# Get Python Scripts path and add to PATH immediately
+Write-Host "  Configuring environment..." -ForegroundColor Gray
 $pyScriptsPath = & $pythonCmd -c "import sysconfig; print(sysconfig.get_paths()['scripts'])" 2>&1
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "  PyInstaller location: $pyScriptsPath" -ForegroundColor Gray
+
+if ($LASTEXITCODE -eq 0 -and $pyScriptsPath) {
+    $pyScriptsPath = $pyScriptsPath.Trim()
     
     # Add to current session PATH
     if ($env:Path -notlike "*$pyScriptsPath*") {
-        $env:Path += ";$pyScriptsPath"
+        $env:Path = "$pyScriptsPath;$env:Path"
+        Write-Host "  Added Scripts to PATH: $pyScriptsPath" -ForegroundColor Gray
+    }
+    
+    # Add to machine PATH permanently
+    $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    if ($machinePath -notlike "*$pyScriptsPath*") {
+        [System.Environment]::SetEnvironmentVariable("Path", "$pyScriptsPath;$machinePath", "Machine")
+        Write-Host "  Updated system PATH permanently" -ForegroundColor Gray
     }
 }
+
+Write-Host "  Installing PyInstaller..." -ForegroundColor Gray
+& $pythonCmd -m pip install pyinstaller --quiet --disable-pip-version-check 2>&1 | Out-Null
+
+Write-Host "  Dependencies installed successfully" -ForegroundColor Green
+
 
 # --- Main build logic ---
 $targetDir = "C:\Program Files (x86)\ossec-agent\active-response"
