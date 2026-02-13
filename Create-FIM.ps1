@@ -334,13 +334,28 @@ try {
     Write-Host "[4/5] Checking PyInstaller installation..." -ForegroundColor Yellow
     Write-Host ""
     
-    Write-Log "Installing/upgrading pip..."
-    & $pythonCmd -m ensurepip --upgrade 2>&1 | Out-File -FilePath $logFile -Append
-    & $pythonCmd -m pip install --upgrade pip 2>&1 | Out-File -FilePath $logFile -Append
+    Write-Log "Ensuring pip is available..."
+    try {
+        # Suppress all output from pip upgrade
+        $null = & $pythonCmd -m ensurepip --upgrade 2>&1
+        $null = & $pythonCmd -m pip install --upgrade pip --quiet 2>&1
+        Write-Log "Pip is ready" -Level "SUCCESS"
+    } catch {
+        Write-Log "Warning during pip setup (continuing anyway)" -Level "WARNING"
+    }
     
     # Check if PyInstaller is installed by trying to import it
-    $pyinstallerCheck = & $pythonCmd -c "import PyInstaller" 2>&1
-    $pyinstallerInstalled = $LASTEXITCODE -eq 0
+    Write-Log "Checking for PyInstaller..."
+    $pyinstallerInstalled = $false
+    
+    try {
+        $null = & $pythonCmd -c "import PyInstaller" 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $pyinstallerInstalled = $true
+        }
+    } catch {
+        $pyinstallerInstalled = $false
+    }
     
     if (-not $pyinstallerInstalled) {
         Write-Log "PyInstaller not found, installing..." -Level "WARNING"
@@ -348,22 +363,25 @@ try {
         Write-Host "  Installing PyInstaller (this may take a minute)..." -ForegroundColor White
         Write-Host ""
         
-        $installOutput = & $pythonCmd -m pip install pyinstaller 2>&1
-        $installOutput | Out-File -FilePath $logFile -Append
-        
-        # Verify installation
-        $verifyCheck = & $pythonCmd -c "import PyInstaller" 2>&1
-        
-        if ($LASTEXITCODE -eq 0) {
-            Write-Log "PyInstaller installed successfully" -Level "SUCCESS"
-        } else {
-            Write-Log "Failed to install PyInstaller" -Level "ERROR"
+        try {
+            $installOutput = & $pythonCmd -m pip install pyinstaller 2>&1
+            $installOutput | Out-File -FilePath $logFile -Append
+            
+            # Verify installation
+            $null = & $pythonCmd -c "import PyInstaller" 2>&1
+            
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "PyInstaller installed successfully" -Level "SUCCESS"
+            } else {
+                throw "PyInstaller import failed after installation"
+            }
+        } catch {
+            Write-Log "Failed to install PyInstaller: $($_.Exception.Message)" -Level "ERROR"
             Write-Host ""
-            Write-Host "Installation output:" -ForegroundColor Yellow
-            Write-Host $installOutput -ForegroundColor Gray
-            Write-Host ""
-            Write-Host "Please install PyInstaller manually:" -ForegroundColor Yellow
+            Write-Host "Installation failed. Please try manually:" -ForegroundColor Yellow
             Write-Host "  $pythonCmd -m pip install pyinstaller" -ForegroundColor White
+            Write-Host ""
+            Write-Host "Log file: $logFile" -ForegroundColor Gray
             Write-Host ""
             Read-Host "Press Enter to exit"
             exit 1
