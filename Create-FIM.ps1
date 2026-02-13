@@ -338,20 +338,29 @@ try {
     & $pythonCmd -m ensurepip --upgrade 2>&1 | Out-File -FilePath $logFile -Append
     & $pythonCmd -m pip install --upgrade pip 2>&1 | Out-File -FilePath $logFile -Append
     
-    $pyinstallerCheck = & $pythonCmd -m pip show pyinstaller 2>&1
+    # Check if PyInstaller is installed by trying to import it
+    $pyinstallerCheck = & $pythonCmd -c "import PyInstaller" 2>&1
+    $pyinstallerInstalled = $LASTEXITCODE -eq 0
     
-    if ($LASTEXITCODE -ne 0) {
+    if (-not $pyinstallerInstalled) {
         Write-Log "PyInstaller not found, installing..." -Level "WARNING"
         Write-Host ""
         Write-Host "  Installing PyInstaller (this may take a minute)..." -ForegroundColor White
         Write-Host ""
         
-        & $pythonCmd -m pip install pyinstaller 2>&1 | Out-File -FilePath $logFile -Append
+        $installOutput = & $pythonCmd -m pip install pyinstaller 2>&1
+        $installOutput | Out-File -FilePath $logFile -Append
+        
+        # Verify installation
+        $verifyCheck = & $pythonCmd -c "import PyInstaller" 2>&1
         
         if ($LASTEXITCODE -eq 0) {
             Write-Log "PyInstaller installed successfully" -Level "SUCCESS"
         } else {
             Write-Log "Failed to install PyInstaller" -Level "ERROR"
+            Write-Host ""
+            Write-Host "Installation output:" -ForegroundColor Yellow
+            Write-Host $installOutput -ForegroundColor Gray
             Write-Host ""
             Write-Host "Please install PyInstaller manually:" -ForegroundColor Yellow
             Write-Host "  $pythonCmd -m pip install pyinstaller" -ForegroundColor White
