@@ -362,6 +362,58 @@ try {
     Write-Log "Configuration scripts executed successfully" -Level "SUCCESS"
 
     # ================================
+# STEP 6.5: DOWNLOAD ACTIVE RESPONSE EXECUTABLES
+# ================================
+Write-Log "[6.5/7] Downloading active response executables..."
+
+$activeResponseBinPath = Join-Path $ossecDir "active-response\bin"
+
+# Ensure the directory exists
+if (-not (Test-Path $activeResponseBinPath)) {
+    Write-Log "Creating active-response\bin directory"
+    New-Item -Path $activeResponseBinPath -ItemType Directory -Force | Out-Null
+    Write-Log "Directory created: $activeResponseBinPath" -Level "SUCCESS"
+}
+
+# Download remove-malware.exe
+Write-Log "Downloading remove-malware.exe"
+try {
+    $malwareExeUrl = "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/remove-malware.exe"
+    $malwareExePath = Join-Path $activeResponseBinPath "remove-malware.exe"
+    
+    Invoke-WebRequest -Uri $malwareExeUrl -OutFile $malwareExePath -UseBasicParsing 2>&1 | Out-File -FilePath $logFile -Append
+    
+    if (Test-Path $malwareExePath) {
+        Write-Log "✓ Downloaded: remove-malware.exe" -Level "SUCCESS"
+    } else {
+        throw "File not found after download"
+    }
+} catch {
+    Write-Log "Failed to download remove-malware.exe: $($_.Exception.Message)" -Level "ERROR"
+    throw "Failed to download remove-malware.exe"
+}
+
+# Download remove-threat.exe
+Write-Log "Downloading remove-threat.exe"
+try {
+    $threatExeUrl = "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/remove-threat.exe"
+    $threatExePath = Join-Path $activeResponseBinPath "remove-threat.exe"
+    
+    Invoke-WebRequest -Uri $threatExeUrl -OutFile $threatExePath -UseBasicParsing 2>&1 | Out-File -FilePath $logFile -Append
+    
+    if (Test-Path $threatExePath) {
+        Write-Log "✓ Downloaded: remove-threat.exe" -Level "SUCCESS"
+    } else {
+        throw "File not found after download"
+    }
+} catch {
+    Write-Log "Failed to download remove-threat.exe: $($_.Exception.Message)" -Level "ERROR"
+    throw "Failed to download remove-threat.exe"
+}
+
+Write-Log "Active response executables downloaded successfully" -Level "SUCCESS"
+
+    # ================================
     # STEP 7: START SERVICE
     # ================================
     Write-Log "[7/7] Starting CyberSentinel service..."
@@ -454,3 +506,4 @@ catch {
 }
 
 Read-Host "Press Enter to exit"
+
