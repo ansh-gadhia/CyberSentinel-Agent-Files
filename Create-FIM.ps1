@@ -29,38 +29,6 @@ function Write-Log {
     }
 }
 
-function Read-SecureInput {
-    param([string]$Prompt)
-    
-    Write-Host $Prompt -NoNewline -ForegroundColor Yellow
-    
-    $input = ""
-    
-    while ($true) {
-        $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-        
-        if ($key.VirtualKeyCode -eq 13) { # Enter
-            Write-Host ""
-            break
-        }
-        elseif ($key.VirtualKeyCode -eq 8) { # Backspace
-            if ($input.Length -gt 0) {
-                $input = $input.Substring(0, $input.Length - 1)
-                Write-Host "`b `b" -NoNewline
-            }
-        }
-        elseif ($key.Character -match '[^\x00-\x1F\x7F]') { # Only printable characters
-            $input += $key.Character
-            Write-Host "*" -NoNewline -ForegroundColor Gray
-        }
-    }
-    
-    # Clean token - remove any control characters
-    $input = $input -replace '[\x00-\x1F\x7F]', ''
-    
-    return $input
-}
-
 try {
     # ================================
     # HEADER
@@ -81,24 +49,8 @@ try {
     Write-Host "GitHub Configuration" -ForegroundColor Yellow
     Write-Host "─────────────────────────────────────────────────" -ForegroundColor DarkGray
     Write-Host ""
-    
-    $GitHubToken = Read-SecureInput "Enter GitHub Personal Access Token: "
-    
-    if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
-        Write-Host ""
-        Write-Host "ERROR: GitHub token cannot be empty!" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "Generate a token at: https://github.com/settings/tokens" -ForegroundColor White
-        Write-Host "Required scope: 'repo' (Full control of private repositories)" -ForegroundColor White
-        Write-Log "ERROR: No GitHub token provided" -Level "ERROR"
-        Read-Host "Press Enter to exit"
-        exit 1
-    }
-    
-    Write-Log "GitHub token provided (length: $($GitHubToken.Length))"
-    Write-Host ""
-    Write-Host "Token received: " -NoNewline -ForegroundColor White
-    Write-Host ("*" * [Math]::Min($GitHubToken.Length, 30)) -ForegroundColor Gray
+    Write-Host "The script will be downloaded from a public GitHub repository." -ForegroundColor White
+    Write-Host "No authentication required." -ForegroundColor Green
     Write-Host ""
     
     $confirm = Read-Host "Proceed with download and build? (Y/N)"
@@ -314,17 +266,15 @@ try {
     Write-Host "[2/5] Downloading Python script from GitHub..." -ForegroundColor Yellow
     Write-Host ""
     
-    $scriptUrl = "https://raw.githubusercontent.com/cybersentinel-06/CyberSentinel-SIEM/refs/heads/main/AGENTS/WINDOWS-AGENT/quarantine_rtgs.py"
+    $scriptUrl = "https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-Files/refs/heads/main/quarantine_rtgs.py"
     
-    # Add token to URL
-    $authenticatedUrl = "${scriptUrl}?token=${GitHubToken}"
-    
-    Write-Log "Downloading from GitHub repository"
+    Write-Log "Downloading from public GitHub repository"
     Write-Log "URL: $scriptUrl"
     
     try {
-        # Download the file
-        Invoke-WebRequest -Uri $authenticatedUrl -OutFile $scriptPath -UseBasicParsing -ErrorAction Stop
+        # Download the file directly (no authentication needed for public repos)
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $scriptUrl -OutFile $scriptPath -UseBasicParsing -ErrorAction Stop
         
         if (Test-Path $scriptPath) {
             $fileSize = (Get-Item $scriptPath).Length
@@ -337,12 +287,12 @@ try {
         Write-Log "Failed to download script: $($_.Exception.Message)" -Level "ERROR"
         Write-Host ""
         Write-Host "Troubleshooting:" -ForegroundColor Yellow
-        Write-Host "  1. Verify your token has 'repo' scope" -ForegroundColor White
-        Write-Host "  2. Check if the repository exists and is accessible" -ForegroundColor White
+        Write-Host "  1. Check your internet connection" -ForegroundColor White
+        Write-Host "  2. Verify the repository exists and is public" -ForegroundColor White
         Write-Host "  3. Ensure the file path is correct in the repository" -ForegroundColor White
         Write-Host ""
-        Write-Host "Repository: https://github.com/cybersentinel-06/CyberSentinel-SIEM" -ForegroundColor White
-        Write-Host "File path: /AGENTS/WINDOWS-AGENT/quarantine_rtgs.py" -ForegroundColor White
+        Write-Host "Repository: https://github.com/ansh-gadhia/CyberSentinel-Agent-Files" -ForegroundColor White
+        Write-Host "File path: /quarantine_rtgs.py" -ForegroundColor White
         Write-Host ""
         Read-Host "Press Enter to exit"
         exit 1
