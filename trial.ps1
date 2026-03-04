@@ -325,55 +325,50 @@ try {
     Write-Host "  ╚══════════════════════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""
 
-    # 4.1 · CA Certificate
+    # 4.1 · CA Certificate — silent background job
     Write-Log "[1/7] CA certificate"
     $lf = $logFile
     $job = Start-Job -ScriptBlock {
         param($lf)
+        $ProgressPreference = "SilentlyContinue"
         Invoke-WebRequest -Uri "https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-Files/main/ca.cer" `
             -OutFile "$env:TEMP\ca.cer" -UseBasicParsing 2>&1 | Out-File $lf -Append
-        Import-Certificate -FilePath "$env:TEMP\ca.cer" -CertStoreLocation Cert:\LocalMachine\Root 2>&1 | Out-File $lf -Append
+        Import-Certificate -FilePath "$env:TEMP\ca.cer" `
+            -CertStoreLocation Cert:\LocalMachine\Root 2>&1 | Out-File $lf -Append
     } -ArgumentList $lf
-    Show-Spinner -Job $job -Label "Downloading & importing CA certificate..."
+    Show-Spinner -Job $job -Label "Preparing secure channel..."
     Receive-Job $job -Wait -ErrorAction Stop | Out-Null; Remove-Job $job -Force
-    Write-Host "  ✓ CA certificate imported" -ForegroundColor Green
+    Write-Host "  ✓ Secure channel ready" -ForegroundColor Green
     Write-Log "CA certificate imported" -Level "SUCCESS"
 
-    # 4.2 · Download MSI
-    Write-Log "[2/7] Download MSI"
-    $job = Start-Job -ScriptBlock {
-        param($lf)
-        Invoke-WebRequest -Uri "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent-1.0.0.msi" `
-            -OutFile "$env:TEMP\cybersentinel-agent.msi" -UseBasicParsing 2>&1 | Out-File $lf -Append
-    } -ArgumentList $lf
-    Show-Spinner -Job $job -Label "Downloading agent package..."
-    Receive-Job $job -Wait -ErrorAction Stop | Out-Null; Remove-Job $job -Force
-    Write-Host "  ✓ Package downloaded" -ForegroundColor Green
-    Write-Log "MSI downloaded" -Level "SUCCESS"
-
-    # 4.3 · Install MSI
-    Write-Log "[3/7] Install MSI"
+    # 4.2 + 4.3 · Download + install — single silent job
+    # /qn suppresses MSI UI; WindowStyle Hidden prevents any window flash
+    Write-Log "[2/7] Download + install agent"
     $msiLog = "$env:TEMP\cybersentinel-msi-install.log"
     $mIP    = $managerIP
     $mName  = $agentName
     $job = Start-Job -ScriptBlock {
-        param($ip, $name, $msiLog)
-        $args = @(
-            "/i", "`"$env:TEMP\cybersentinel-agent.msi`"",
-            "/qn", "/norestart",
-            "WAZUH_MANAGER=`"$ip`"",
-            "WAZUH_AGENT_NAME=`"$name`"",
-            "/L*v", "`"$msiLog`""
-        )
-        $p = Start-Process -FilePath "msiexec.exe" -ArgumentList $args -Wait -PassThru
+        param($ip, $name, $msiLog, $lf)
+        $ProgressPreference = "SilentlyContinue"
+        Invoke-WebRequest `
+            -Uri "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent-1.0.0.msi" `
+            -OutFile "$env:TEMP\cybersentinel-agent.msi" `
+            -UseBasicParsing 2>&1 | Out-File $lf -Append
+        $installArgs = "/i `"$env:TEMP\cybersentinel-agent.msi`" /qn /norestart " +
+                       "WAZUH_MANAGER=`"$ip`" WAZUH_AGENT_NAME=`"$name`" /L*v `"$msiLog`""
+        $p = Start-Process -FilePath "msiexec.exe" `
+                           -ArgumentList $installArgs `
+                           -WindowStyle Hidden `
+                           -Wait -PassThru
         return $p.ExitCode
-    } -ArgumentList $mIP, $mName, $msiLog
-    Show-Spinner -Job $job -Label "Installing agent (this may take a minute)..."
+    } -ArgumentList $mIP, $mName, $msiLog, $lf
+    Show-Spinner -Job $job -Label "Installing agent..."
     $exitCode = Receive-Job $job -Wait -ErrorAction Stop; Remove-Job $job -Force
-    if ($exitCode -ne 0) { throw "MSI installation failed (exit code $exitCode). Log: $msiLog" }
+    if ($exitCode -ne 0) { throw "Installation failed (exit code $exitCode). See log: $msiLog" }
     Write-Host "  ✓ Agent installed" -ForegroundColor Green
-    Write-Log "MSI installed" -Level "SUCCESS"
+    Write-Log "Agent installed" -Level "SUCCESS"
     Start-Sleep -Seconds 2
+
 
     $ossecDir = "C:\Program Files (x86)\ossec-agent"
     if (-not (Test-Path $ossecDir)) { throw "Installation directory not found: $ossecDir" }
