@@ -190,7 +190,7 @@ try {
     # ─────────────────────────────────────────
     # STEP 1 · GitHub Token + Validation
     # ─────────────────────────────────────────
-    Write-Step "Step 1 of 4  ·  GitHub Token Validation"
+    Write-Step "GitHub Token"
 
     $GitHubToken = Read-SecureInput "  Enter GitHub Personal Access Token: "
 
@@ -212,43 +212,42 @@ try {
 
     Write-Host ""
 
-    foreach ($file in @(
-        "AGENTS/WINDOWS-AGENT/ossec.conf",
-        "AGENTS/WINDOWS-AGENT/enrich.ps1",
-        "AGENTS/WINDOWS-AGENT/sysmon.ps1"
-    )) {
-        $vUrl = "https://api.github.com/repos/$privateRepoOwner/$privateRepoName/contents/$file"
-        $vHdr = $headers
-        $job = Start-Job -ScriptBlock {
-            param($u, $h)
-            Invoke-WebRequest -Uri $u -Headers $h -Method GET -UseBasicParsing | Out-Null
-        } -ArgumentList $vUrl, $vHdr
-
-        Show-Spinner -Job $job -Label "Validating: $file"
-
-        if ($job.State -eq "Failed") {
-            Receive-Job $job -ErrorAction SilentlyContinue | Out-Null
-            Remove-Job $job -Force -ErrorAction SilentlyContinue
-            Write-Host "  ✗ Access denied: $file" -ForegroundColor Red
-            Write-Host "    Check token scope ('repo') and expiry." -ForegroundColor DarkGray
-            Write-Log "GitHub validation failed: $file" -Level "ERROR"
-            Read-Host "Press Enter to exit"; exit 1
+    $vOwner = $privateRepoOwner
+    $vRepo  = $privateRepoName
+    $vHdrs  = $headers
+    $job = Start-Job -ScriptBlock {
+        param($owner, $repo, $hdrs)
+        $files = @(
+            "AGENTS/WINDOWS-AGENT/ossec.conf",
+            "AGENTS/WINDOWS-AGENT/enrich.ps1",
+            "AGENTS/WINDOWS-AGENT/sysmon.ps1"
+        )
+        foreach ($f in $files) {
+            $url = "https://api.github.com/repos/$owner/$repo/contents/$f"
+            Invoke-WebRequest -Uri $url -Headers $hdrs -Method GET -UseBasicParsing | Out-Null
         }
+    } -ArgumentList $vOwner, $vRepo, $vHdrs
 
-        Receive-Job $job -Wait | Out-Null
+    Show-Spinner -Job $job -Label "Validating GitHub access..."
+
+    if ($job.State -eq "Failed") {
+        Receive-Job $job -ErrorAction SilentlyContinue | Out-Null
         Remove-Job $job -Force -ErrorAction SilentlyContinue
-        Write-Host "  ✓ $file" -ForegroundColor Green
-        Write-Log "Validated: $file" -Level "SUCCESS"
+        Write-Host "  ✗ GitHub access failed." -ForegroundColor Red
+        Write-Host "    Check token scope ('repo') and expiry." -ForegroundColor DarkGray
+        Write-Log "GitHub validation failed" -Level "ERROR"
+        Read-Host "Press Enter to exit"; exit 1
     }
 
-    Write-Host ""
+    Receive-Job $job -Wait | Out-Null
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
     Write-Host "  ✓ GitHub access confirmed." -ForegroundColor Green
     Write-Log "GitHub token validated" -Level "SUCCESS"
 
     # ─────────────────────────────────────────
     # STEP 2 · Existing Installation Check
     # ─────────────────────────────────────────
-    Write-Step "Step 2 of 4  ·  Existing Installation Check"
+    Write-Step "Pre-Installation Check"
 
     $found = Test-ExistingInstallation
 
@@ -283,7 +282,7 @@ try {
     # ─────────────────────────────────────────
     # STEP 3 · Configuration Input
     # ─────────────────────────────────────────
-    Write-Step "Step 3 of 4  ·  Installation Configuration"
+    Write-Step "Configuration"
 
     do {
         $managerIP = Read-Host "  Manager IP address"
@@ -414,11 +413,11 @@ try {
                             [System.Convert]::FromBase64String($response.content))
             Set-Content -Path $dst -Value $content -Encoding UTF8
         } -ArgumentList $owner, $repo, $rp, $dst, $hdrs
-        Show-Spinner -Job $job -Label "Fetching $rp..."
+        Show-Spinner -Job $job -Label "Fetching configuration files..."
         Receive-Job $job -Wait -ErrorAction Stop | Out-Null; Remove-Job $job -Force
-        Write-Host "  ✓ $rp" -ForegroundColor Green
         Write-Log "Downloaded: $rp" -Level "SUCCESS"
     }
+    Write-Host "  ✓ Configuration files applied" -ForegroundColor Green
 
     # 4.6 · Run scripts
     Write-Log "[6/7] Running config scripts"
@@ -429,12 +428,12 @@ try {
             param($s, $lf)
             & powershell.exe -ExecutionPolicy Bypass -File $s 2>&1 | Out-File $lf -Append
         } -ArgumentList $sp, $lf
-        Show-Spinner -Job $job -Label "Running $sName..."
+        Show-Spinner -Job $job -Label "Applying agent configuration..."
         try { Receive-Job $job -Wait -ErrorAction Stop | Out-Null } catch { Write-Log "Warning: $sName - $_" -Level "WARNING" }
         Remove-Job $job -Force -ErrorAction SilentlyContinue
-        Write-Host "  ✓ $sName completed" -ForegroundColor Green
         Write-Log "$sName completed" -Level "SUCCESS"
     }
+    Write-Host "  ✓ Agent configuration applied" -ForegroundColor Green
 
     # 4.6.5 · Active response executables
     Write-Log "[6.5/7] Active response executables"
@@ -448,12 +447,12 @@ try {
             param($u, $p, $lf)
             Invoke-WebRequest -Uri $u -OutFile $p -UseBasicParsing 2>&1 | Out-File $lf -Append
         } -ArgumentList $eUrl, $ePath, $lf
-        Show-Spinner -Job $job -Label "Downloading $exeName..."
+        Show-Spinner -Job $job -Label "Downloading response modules..."
         Receive-Job $job -Wait -ErrorAction Stop | Out-Null; Remove-Job $job -Force
         if (-not (Test-Path $ePath)) { throw "Download failed: $exeName" }
-        Write-Host "  ✓ $exeName" -ForegroundColor Green
         Write-Log "Downloaded: $exeName" -Level "SUCCESS"
     }
+    Write-Host "  ✓ Response modules downloaded" -ForegroundColor Green
 
     # 4.7 · Start service
     Write-Log "[7/7] Starting service"
