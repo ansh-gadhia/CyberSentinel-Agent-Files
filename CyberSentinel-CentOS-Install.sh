@@ -149,37 +149,45 @@ install_python3_centos7() {
     local PYTHON_SRC_URL="https://www.python.org/ftp/python/${PYTHON_VER}/Python-${PYTHON_VER}.tgz"
     local PYTHON_SRC_DIR="/usr/local/src/Python-${PYTHON_VER}"
 
-    echo -e "  ${BOLD}Installing Python ${PYTHON_VER} build dependencies...${NC}"
-    yum install -y gcc make openssl-devel bzip2-devel libffi-devel \
-                   zlib-devel readline-devel sqlite-devel xz-devel \
-                   wget curl &>>"$LOG_FILE" &
-    spinner $! "Installing build dependencies"
-    handle_error $? "Failed to install Python build dependencies."
+    # Helper: run a command with spinner, logging stdout+stderr to LOG_FILE
+    # Usage: run_logged "Label" cmd arg1 arg2 ...
+    run_logged() {
+        local label="$1"; shift
+        "$@" >> "$LOG_FILE" 2>&1 &
+        spinner $! "$label"
+        local rc=$?
+        if [ $rc -ne 0 ]; then
+            echo -e "  ${RED}✘ '$label' failed (exit $rc). Last 10 lines of log:${NC}" >&2
+            tail -10 "$LOG_FILE" | sed 's/^/    /' >&2
+            exit $rc
+        fi
+    }
 
-    echo -e "  ${BOLD}Downloading Python ${PYTHON_VER} source...${NC}"
-    curl -L -o "/tmp/Python-${PYTHON_VER}.tgz" "$PYTHON_SRC_URL" &>>"$LOG_FILE" &
-    spinner $! "Downloading Python ${PYTHON_VER}"
-    handle_error $? "Failed to download Python source."
+    # --- Build dependencies ---
+    run_logged "Installing build dependencies" \
+        yum install -y gcc make openssl-devel bzip2-devel libffi-devel \
+                       zlib-devel readline-devel sqlite-devel xz-devel wget curl
 
+    # --- Download source ---
+    run_logged "Downloading Python ${PYTHON_VER}" \
+        curl -fL -o "/tmp/Python-${PYTHON_VER}.tgz" "$PYTHON_SRC_URL"
+
+    # --- Extract ---
     mkdir -p /usr/local/src
-    tar -xzf "/tmp/Python-${PYTHON_VER}.tgz" -C /usr/local/src/ &>>"$LOG_FILE"
+    tar -xzf "/tmp/Python-${PYTHON_VER}.tgz" -C /usr/local/src/ >> "$LOG_FILE" 2>&1
     handle_error $? "Failed to extract Python source."
 
-    echo -e "  ${BOLD}Configuring Python ${PYTHON_VER}...${NC}"
-    (cd "$PYTHON_SRC_DIR" && ./configure --enable-optimizations --with-ensurepip=install) \
-        &>>"$LOG_FILE" &
-    spinner $! "Configuring"
-    handle_error $? "Python configure failed."
+    # --- Configure ---
+    run_logged "Configuring Python ${PYTHON_VER}" \
+        bash -c "cd '$PYTHON_SRC_DIR' && ./configure --enable-optimizations --with-ensurepip=install"
 
-    echo -e "  ${BOLD}Compiling Python ${PYTHON_VER} (this may take several minutes)...${NC}"
-    (cd "$PYTHON_SRC_DIR" && make -j"$(nproc)") &>>"$LOG_FILE" &
-    spinner $! "Compiling Python ${PYTHON_VER}"
-    handle_error $? "Python compilation failed."
+    # --- Compile ---
+    run_logged "Compiling Python ${PYTHON_VER} (may take several minutes)" \
+        bash -c "cd '$PYTHON_SRC_DIR' && make -j$(nproc)"
 
-    echo -e "  ${BOLD}Installing Python ${PYTHON_VER} (altinstall — preserves system python2)...${NC}"
-    (cd "$PYTHON_SRC_DIR" && make altinstall) &>>"$LOG_FILE" &
-    spinner $! "Installing Python ${PYTHON_VER}"
-    handle_error $? "Python altinstall failed."
+    # --- Install (altinstall preserves system python2) ---
+    run_logged "Installing Python ${PYTHON_VER}" \
+        bash -c "cd '$PYTHON_SRC_DIR' && make altinstall"
 
     # Symlink python3 → python3.11
     [ ! -f /usr/bin/python3  ] && ln -s /usr/local/bin/python3.11  /usr/bin/python3
