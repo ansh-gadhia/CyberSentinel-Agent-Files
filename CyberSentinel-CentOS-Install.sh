@@ -128,8 +128,6 @@ if [ "$OS_MAJOR" = "7" ]; then
     WAZUH_RPM="wazuh-agent_4.14.0-1.x86_64.rpm"
     WAZUH_PKG_URL="https://packages.wazuh.com/4.x/yum/wazuh-agent-4.14.0-1.x86_64.rpm"
     PKG_MANAGER="yum"
-    SURICATA_INSTALL_CMD="yum install suricata -y"
-    SURICATA_REPO_CMD="yum install -y epel-release && yum install -y suricata"
     success "Agent path set to: ${AGENT_PATH} (CentOS 7 — legacy path)"
 else
     # CentOS 8, 9, Stream, or any future version
@@ -137,7 +135,6 @@ else
     WAZUH_RPM="wazuh-agent_4.14.0-1.x86_64.rpm"
     WAZUH_PKG_URL="https://packages.wazuh.com/4.x/yum/wazuh-agent-4.14.0-1.x86_64.rpm"
     PKG_MANAGER="dnf"
-    SURICATA_REPO_CMD="dnf install -y epel-release && dnf install -y suricata"
     success "Agent path set to: ${AGENT_PATH} (CentOS ${OS_MAJOR})"
 fi
 
@@ -145,8 +142,53 @@ BASE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/AGENTS/${AGENT_P
 success "Base URL: ${BASE_URL}"
 
 # ============================================================
-# PYTHON 3 — CentOS 7 only (ships with Python 2.7 by default)
+# PYTHON 3 — CentOS 7 only (compile from source — most reliable)
 # ============================================================
+install_python3_centos7() {
+    local PYTHON_VER="3.11.9"
+    local PYTHON_SRC_URL="https://www.python.org/ftp/python/${PYTHON_VER}/Python-${PYTHON_VER}.tgz"
+    local PYTHON_SRC_DIR="/usr/local/src/Python-${PYTHON_VER}"
+
+    echo -e "  ${BOLD}Installing Python ${PYTHON_VER} build dependencies...${NC}"
+    yum install -y gcc make openssl-devel bzip2-devel libffi-devel \
+                   zlib-devel readline-devel sqlite-devel xz-devel \
+                   wget curl &>>"$LOG_FILE" &
+    spinner $! "Installing build dependencies"
+    handle_error $? "Failed to install Python build dependencies."
+
+    echo -e "  ${BOLD}Downloading Python ${PYTHON_VER} source...${NC}"
+    curl -L -o "/tmp/Python-${PYTHON_VER}.tgz" "$PYTHON_SRC_URL" &>>"$LOG_FILE" &
+    spinner $! "Downloading Python ${PYTHON_VER}"
+    handle_error $? "Failed to download Python source."
+
+    mkdir -p /usr/local/src
+    tar -xzf "/tmp/Python-${PYTHON_VER}.tgz" -C /usr/local/src/ &>>"$LOG_FILE"
+    handle_error $? "Failed to extract Python source."
+
+    echo -e "  ${BOLD}Configuring Python ${PYTHON_VER}...${NC}"
+    (cd "$PYTHON_SRC_DIR" && ./configure --enable-optimizations --with-ensurepip=install) \
+        &>>"$LOG_FILE" &
+    spinner $! "Configuring"
+    handle_error $? "Python configure failed."
+
+    echo -e "  ${BOLD}Compiling Python ${PYTHON_VER} (this may take several minutes)...${NC}"
+    (cd "$PYTHON_SRC_DIR" && make -j"$(nproc)") &>>"$LOG_FILE" &
+    spinner $! "Compiling Python ${PYTHON_VER}"
+    handle_error $? "Python compilation failed."
+
+    echo -e "  ${BOLD}Installing Python ${PYTHON_VER} (altinstall — preserves system python2)...${NC}"
+    (cd "$PYTHON_SRC_DIR" && make altinstall) &>>"$LOG_FILE" &
+    spinner $! "Installing Python ${PYTHON_VER}"
+    handle_error $? "Python altinstall failed."
+
+    # Symlink python3 → python3.11
+    [ ! -f /usr/bin/python3  ] && ln -s /usr/local/bin/python3.11  /usr/bin/python3
+    [ ! -f /usr/bin/pip3     ] && ln -s /usr/local/bin/pip3.11     /usr/bin/pip3     2>/dev/null || true
+
+    # Cleanup
+    rm -f "/tmp/Python-${PYTHON_VER}.tgz"
+}
+
 if [ "$OS_MAJOR" = "7" ]; then
     step "Python 3 │ Installation (CentOS 7)"
 
@@ -157,122 +199,23 @@ if [ "$OS_MAJOR" = "7" ]; then
     fi
 
     if [ -n "$PYTHON3_VER" ]; then
-        success "Python 3 is already installed: ${PYTHON3_BIN} (v${PYTHON3_VER})"
+        success "Python 3 already installed: ${PYTHON3_BIN} (v${PYTHON3_VER})"
     else
-        warn "Python 3 not found. CentOS 7 ships with Python 2.7 — installing Python 3 via IUS/SCL..."
-        echo ""
-        echo -e "  ${BOLD}Choose Python 3 installation method:${NC}"
-        echo "  [1] IUS repository (recommended — installs python3.8)"
-        echo "  [2] Software Collections (SCL) — installs python38"
-        echo "  [3] Compile from source (python 3.11, no repo required)"
-        echo ""
-        read -p "  Choice [1/2/3]: " PY_CHOICE
+        warn "Python 3 not found. Installing Python 3.11.9 from source..."
+        install_python3_centos7
 
-        case "$PY_CHOICE" in
-            1)
-                echo -e "  ${BOLD}Installing IUS repository and Python 3.8...${NC}"
-                yum install -y https://repo.ius.io/ius-release-el7.rpm \
-                               https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm \
-                               &>>"$LOG_FILE" &
-                spinner $! "Adding IUS repository"
-                handle_error $? "Failed to add IUS repository."
-
-                yum install -y python38 python38-pip python38-devel &>>"$LOG_FILE" &
-                spinner $! "Installing Python 3.8 (IUS)"
-                handle_error $? "Failed to install Python 3.8 via IUS."
-
-                # Create /usr/bin/python3 symlink if not present
-                if [ ! -f /usr/bin/python3 ]; then
-                    ln -s /usr/bin/python3.8 /usr/bin/python3
-                fi
-                ;;
-            2)
-                echo -e "  ${BOLD}Installing SCL and python38...${NC}"
-                yum install -y centos-release-scl &>>"$LOG_FILE" &
-                spinner $! "Adding SCL repository"
-                handle_error $? "Failed to add SCL repository."
-
-                yum install -y rh-python38 rh-python38-python-pip rh-python38-python-devel &>>"$LOG_FILE" &
-                spinner $! "Installing Python 3.8 (SCL)"
-                handle_error $? "Failed to install Python 3.8 via SCL."
-
-                # Expose python3 globally via a wrapper symlink
-                SCL_PYTHON3="/opt/rh/rh-python38/root/usr/bin/python3"
-                if [ -f "$SCL_PYTHON3" ] && [ ! -f /usr/local/bin/python3 ]; then
-                    ln -s "$SCL_PYTHON3" /usr/local/bin/python3
-                    ln -s "/opt/rh/rh-python38/root/usr/bin/pip3" /usr/local/bin/pip3 2>/dev/null || true
-                fi
-                ;;
-            3)
-                PYTHON_VER="3.11.9"
-                PYTHON_SRC_URL="https://www.python.org/ftp/python/${PYTHON_VER}/Python-${PYTHON_VER}.tgz"
-                PYTHON_SRC_DIR="/usr/local/src/Python-${PYTHON_VER}"
-
-                echo -e "  ${BOLD}Installing build dependencies for Python ${PYTHON_VER}...${NC}"
-                yum install -y gcc make openssl-devel bzip2-devel libffi-devel \
-                               zlib-devel readline-devel sqlite-devel xz-devel &>>"$LOG_FILE" &
-                spinner $! "Installing Python build dependencies"
-                handle_error $? "Failed to install Python build dependencies."
-
-                echo -e "  ${BOLD}Downloading Python ${PYTHON_VER} source...${NC}"
-                curl -L -o "/tmp/Python-${PYTHON_VER}.tgz" "$PYTHON_SRC_URL" &>>"$LOG_FILE" &
-                spinner $! "Downloading Python ${PYTHON_VER}"
-                handle_error $? "Failed to download Python source."
-
-                echo -e "  ${BOLD}Extracting source...${NC}"
-                mkdir -p /usr/local/src
-                tar -xzf "/tmp/Python-${PYTHON_VER}.tgz" -C /usr/local/src/ &>>"$LOG_FILE"
-                handle_error $? "Failed to extract Python source."
-
-                echo -e "  ${BOLD}Configuring Python ${PYTHON_VER}...${NC}"
-                (cd "$PYTHON_SRC_DIR" && ./configure --enable-optimizations --with-ensurepip=install) \
-                    &>>"$LOG_FILE" &
-                spinner $! "Configuring"
-                handle_error $? "Python configure failed."
-
-                echo -e "  ${BOLD}Compiling Python ${PYTHON_VER} (this may take several minutes)...${NC}"
-                (cd "$PYTHON_SRC_DIR" && make -j"$(nproc)") &>>"$LOG_FILE" &
-                spinner $! "Compiling Python ${PYTHON_VER}"
-                handle_error $? "Python compilation failed."
-
-                echo -e "  ${BOLD}Installing Python ${PYTHON_VER} (altinstall — preserves system python2)...${NC}"
-                (cd "$PYTHON_SRC_DIR" && make altinstall) &>>"$LOG_FILE" &
-                spinner $! "Installing Python ${PYTHON_VER}"
-                handle_error $? "Python altinstall failed."
-
-                # Symlink python3 → python3.11
-                if [ ! -f /usr/bin/python3 ]; then
-                    ln -s /usr/local/bin/python3.11 /usr/bin/python3
-                fi
-                if [ ! -f /usr/bin/pip3 ]; then
-                    ln -s /usr/local/bin/pip3.11 /usr/bin/pip3 2>/dev/null || true
-                fi
-
-                # Cleanup source tarball
-                rm -f "/tmp/Python-${PYTHON_VER}.tgz"
-                ;;
-            *)
-                error "Invalid choice. Exiting."
-                exit 1
-                ;;
-        esac
-
-        # Verify installation
         PYTHON3_BIN=$(command -v python3 2>/dev/null || true)
-        if [ -n "$PYTHON3_BIN" ]; then
-            PYTHON3_VER=$("$PYTHON3_BIN" --version 2>&1 | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-            success "Python 3 installed successfully: ${PYTHON3_BIN} (v${PYTHON3_VER})"
-
-            # Upgrade pip
-            "$PYTHON3_BIN" -m pip install --upgrade pip &>>"$LOG_FILE" &
-            spinner $! "Upgrading pip"
-        else
+        if [ -z "$PYTHON3_BIN" ]; then
             error "Python 3 installation failed — binary not found in PATH."
             exit 1
         fi
+        PYTHON3_VER=$("$PYTHON3_BIN" --version 2>&1 | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        success "Python 3 installed successfully: ${PYTHON3_BIN} (v${PYTHON3_VER})"
+
+        "$PYTHON3_BIN" -m pip install --upgrade pip &>>"$LOG_FILE" &
+        spinner $! "Upgrading pip"
     fi
 
-    # Ensure python3 is the active python3 for subsequent steps
     export PATH="/usr/local/bin:/usr/bin:$PATH"
     success "Python 3 is ready: $(python3 --version 2>&1)"
 fi
@@ -311,7 +254,6 @@ trap rollback EXIT
 # ============================================================
 step "Step 0 │ GitHub Token Validation"
 
-# Read a password/token char-by-char and echo '*' for each keystroke
 read_masked() {
     local __var="$1"
     local __prompt="$2"
@@ -320,19 +262,16 @@ read_masked() {
 
     printf "%s" "$__prompt"
 
-    # Disable echo and line-buffering
     stty -echo -icanon min 1 time 0
 
     while IFS= read -r -d '' -n1 __char 2>/dev/null; do
-        # Handle Enter / newline — done
         if [[ "$__char" == $'\n' || "$__char" == $'\r' || -z "$__char" ]]; then
             break
         fi
-        # Handle Backspace (^H or DEL)
         if [[ "$__char" == $'\x7f' || "$__char" == $'\x08' ]]; then
             if [ ${#__input} -gt 0 ]; then
                 __input="${__input%?}"
-                printf '\b \b'   # erase last asterisk
+                printf '\b \b'
             fi
         else
             __input+="$__char"
@@ -341,7 +280,7 @@ read_masked() {
     done
 
     stty sane
-    echo   # newline after input
+    echo
     printf -v "$__var" '%s' "$__input"
 }
 
@@ -785,7 +724,6 @@ if command -v getenforce &>/dev/null; then
     if [ "$SELINUX_STATUS" = "Enforcing" ]; then
         warn "SELinux is Enforcing. Setting to Permissive for agent compatibility..."
         setenforce 0 &>>"$LOG_FILE"
-        # Persist across reboots
         sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config
         success "SELinux set to Permissive (persisted in /etc/selinux/config)."
     else
