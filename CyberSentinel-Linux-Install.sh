@@ -9,7 +9,7 @@ LOG_FILE="$LOG_DIR/install.log"
 BASE_URL="https://raw.githubusercontent.com/cybersentinel-06/CyberSentinel-SIEM/main/AGENTS/UBUNTU-AGENT"
 BIN_DIR="/var/ossec/active-response/bin"
 
-WAZUH_DEB="wazuh-agent_4.12.0-1_amd64.deb"
+WAZUH_DEB="wazuh-agent_4.14.0-1_amd64.deb"
 WAZUH_PKG_URL="https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/$WAZUH_DEB"
 GITHUB_REPO="cybersentinel-06/CyberSentinel-SIEM"
 WAZUH_AGENT_PORT=1514
