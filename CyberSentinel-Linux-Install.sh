@@ -99,6 +99,7 @@ rollback() {
         dpkg --purge wazuh-agent &>/dev/null || true
         rm -f /etc/systemd/system/cybersentinel-agent.service
         rm -f /tmp/"$WAZUH_DEB"
+        rm -rf /usr/local/bin/yara-4.5.5
         systemctl daemon-reload &>/dev/null || true
         error "Rollback complete. System restored to pre-install state."
         error "Check the log for details: $LOG_FILE"
@@ -350,6 +351,106 @@ else
 fi
 
 # ============================================================
+# STEP 3.5 — Install YARA (latest version from source)
+# ============================================================
+step "Step 3.5 │ YARA v4.5.5 Installation"
+
+YARA_VERSION="4.5.5"
+YARA_TARBALL="v${YARA_VERSION}.tar.gz"
+YARA_URL="https://github.com/VirusTotal/yara/archive/${YARA_TARBALL}"
+YARA_SRC_DIR="/usr/local/bin/yara-${YARA_VERSION}"
+YARA_RULES_DIR="/tmp/yara/rules"
+
+# 1 — Dependencies
+echo -e "  ${BOLD}Installing YARA build dependencies...${NC}"
+apt-get update -qq &>>"$LOG_FILE"
+apt-get install -y make gcc autoconf libtool libssl-dev pkg-config jq &>>"$LOG_FILE" &
+spinner $! "Installing build dependencies"
+handle_error $? "Failed to install YARA build dependencies."
+
+# 2 — Download source tarball
+echo -e "  ${BOLD}Downloading YARA v${YARA_VERSION} source...${NC}"
+curl -LO "$YARA_URL" &>>"$LOG_FILE" &
+spinner $! "Downloading YARA v${YARA_VERSION}"
+handle_error $? "Failed to download YARA source tarball."
+
+# 3 — Extract directly into /usr/local/bin and remove tarball
+echo -e "  ${BOLD}Extracting YARA source to /usr/local/bin/...${NC}"
+tar -xvzf "$YARA_TARBALL" -C /usr/local/bin/ &>>"$LOG_FILE" \
+    && rm -f "$YARA_TARBALL"
+handle_error $? "Failed to extract YARA source."
+
+# 4 — Bootstrap
+echo -e "  ${BOLD}Bootstrapping YARA...${NC}"
+(cd "$YARA_SRC_DIR" && ./bootstrap.sh) &>>"$LOG_FILE" &
+spinner $! "Bootstrapping"
+handle_error $? "YARA bootstrap failed."
+
+# 5 — Configure
+echo -e "  ${BOLD}Configuring YARA...${NC}"
+(cd "$YARA_SRC_DIR" && ./configure) &>>"$LOG_FILE" &
+spinner $! "Configuring"
+handle_error $? "YARA configure failed."
+
+# 6 — Compile
+echo -e "  ${BOLD}Compiling YARA (this may take a moment)...${NC}"
+(cd "$YARA_SRC_DIR" && make) &>>"$LOG_FILE" &
+spinner $! "Compiling"
+handle_error $? "YARA compilation failed."
+
+# 7 — Install
+echo -e "  ${BOLD}Installing YARA...${NC}"
+(cd "$YARA_SRC_DIR" && make install) &>>"$LOG_FILE" &
+spinner $! "Installing YARA"
+handle_error $? "YARA make install failed."
+
+# 8 — Run test suite
+echo -e "  ${BOLD}Running YARA test suite...${NC}"
+(cd "$YARA_SRC_DIR" && make check) &>>"$LOG_FILE" &
+spinner $! "Running make check"
+if [ $? -ne 0 ]; then
+    warn "YARA test suite reported failures — check $LOG_FILE for details."
+else
+    success "YARA test suite passed."
+fi
+
+# 9 — Update shared library cache
+ldconfig &>>"$LOG_FILE"
+
+# 10 — Verify binary
+YARA_INSTALLED_VER=$(yara --version 2>/dev/null || true)
+if [ -n "$YARA_INSTALLED_VER" ]; then
+    success "YARA ${YARA_INSTALLED_VER} installed successfully → $(command -v yara)"
+else
+    warn "YARA binary not found in PATH after install — check $LOG_FILE for details."
+fi
+
+# 11 — Download Valhalla community YARA rules
+echo -e "  ${BOLD}Downloading Valhalla community YARA rules...${NC}"
+mkdir -p "$YARA_RULES_DIR"
+curl -s \
+    -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' \
+    -H 'Accept-Language: en-US,en;q=0.5' \
+    --compressed \
+    -H 'Referer: https://valhalla.nextron-systems.com/' \
+    -H 'Content-Type: application/x-www-form-urlencoded' \
+    -H 'DNT: 1' \
+    -H 'Connection: keep-alive' \
+    -H 'Upgrade-Insecure-Requests: 1' \
+    --data 'demo=demo&apikey=1111111111111111111111111111111111111111111111111111111111111111&format=text' \
+    -o "${YARA_RULES_DIR}/yara_rules.yar" \
+    'https://valhalla.nextron-systems.com/api/v1/get' &
+spinner $! "Downloading Valhalla YARA rules"
+handle_error $? "Failed to download Valhalla YARA rules."
+
+if [ -s "${YARA_RULES_DIR}/yara_rules.yar" ]; then
+    RULE_COUNT=$(grep -c "^rule " "${YARA_RULES_DIR}/yara_rules.yar" 2>/dev/null || echo "unknown")
+    success "Valhalla rules saved → ${YARA_RULES_DIR}/yara_rules.yar (${RULE_COUNT} rules)"
+else
+    warn "Valhalla rules file is empty — verify API key or network connectivity."
+fi
+
+# ============================================================
 # STEP 4 — Download & apply ossec.conf
 # ============================================================
 step "Step 4 │ Configuration File"
@@ -478,6 +579,7 @@ sleep 2  # Give service a moment to settle
 
 CS_STATUS=$(systemctl is-active cybersentinel-agent 2>/dev/null)
 SURICATA_STATUS=$(systemctl is-active suricata 2>/dev/null)
+YARA_VER=$(yara --version 2>/dev/null || echo "not found")
 
 if [ "$CS_STATUS" = "active" ]; then
     success "cybersentinel-agent  →  ${GREEN}running${NC}"
@@ -489,6 +591,12 @@ if [ "$SURICATA_STATUS" = "active" ]; then
     success "suricata             →  ${GREEN}running${NC}"
 else
     warn "suricata             →  ${RED}${SURICATA_STATUS}${NC}"
+fi
+
+if [ "$YARA_VER" != "not found" ]; then
+    success "yara                 →  ${GREEN}v${YARA_VER}${NC}"
+else
+    warn "yara                 →  ${RED}not found${NC}"
 fi
 
 # Disarm rollback — installation succeeded
@@ -504,6 +612,8 @@ echo -e "${CYAN}${BOLD}╚══════════════════
 echo -e "  Manager IP   : ${BOLD}$MANAGER_IP${NC}"
 echo -e "  Agent Name   : ${BOLD}$AGENT_NAME${NC}"
 echo -e "  Agent IP     : ${BOLD}$AgentIP${NC} (${InterfaceName})"
+echo -e "  YARA Version : ${BOLD}${YARA_VER}${NC}"
+echo -e "  YARA Rules   : ${BOLD}/tmp/yara/rules/yara_rules.yar${NC}"
 echo -e "  Install Log  : ${BOLD}$LOG_FILE${NC}"
 echo -e "  Log Rotation : ${BOLD}${LOGROTATE_CONF}${NC} (weekly, 8 archives)"
 echo -e "  Mode         : ${BOLD}$( $SKIP_PACKAGE && echo 'Repair/Reconfigure' || echo 'Full Install' )${NC}"
