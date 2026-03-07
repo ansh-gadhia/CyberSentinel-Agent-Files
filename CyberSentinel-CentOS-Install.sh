@@ -125,8 +125,8 @@ success "Detected: CentOS ${OS_MAJOR}"
 # ============================================================
 if [ "$OS_MAJOR" = "7" ]; then
     AGENT_PATH="CENTOS-7-AGENT"
-    WAZUH_RPM="wazuh-agent_4.12.0-1.x86_64.rpm"
-    WAZUH_PKG_URL="https://packages.wazuh.com/4.x/yum/wazuh-agent-4.12.0-1.x86_64.rpm"
+    WAZUH_RPM="wazuh-agent_4.14.0-1.x86_64.rpm"
+    WAZUH_PKG_URL="https://packages.wazuh.com/4.x/yum/wazuh-agent-4.14.0-1.x86_64.rpm"
     PKG_MANAGER="yum"
     SURICATA_INSTALL_CMD="yum install suricata -y"
     SURICATA_REPO_CMD="yum install -y epel-release && yum install -y suricata"
@@ -134,8 +134,8 @@ if [ "$OS_MAJOR" = "7" ]; then
 else
     # CentOS 8, 9, Stream, or any future version
     AGENT_PATH="CENTOS-AGENT"
-    WAZUH_RPM="wazuh-agent_4.12.0-1.x86_64.rpm"
-    WAZUH_PKG_URL="https://packages.wazuh.com/4.x/yum/wazuh-agent-4.12.0-1.x86_64.rpm"
+    WAZUH_RPM="wazuh-agent_4.14.0-1.x86_64.rpm"
+    WAZUH_PKG_URL="https://packages.wazuh.com/4.x/yum/wazuh-agent-4.14.0-1.x86_64.rpm"
     PKG_MANAGER="dnf"
     SURICATA_REPO_CMD="dnf install -y epel-release && dnf install -y suricata"
     success "Agent path set to: ${AGENT_PATH} (CentOS ${OS_MAJOR})"
