@@ -148,52 +148,61 @@ install_python3_centos7() {
     local PYTHON_VER="3.11.9"
     local PYTHON_SRC_URL="https://www.python.org/ftp/python/${PYTHON_VER}/Python-${PYTHON_VER}.tgz"
     local PYTHON_SRC_DIR="/usr/local/src/Python-${PYTHON_VER}"
+    local rc
 
-    # Helper: run a command with spinner, logging stdout+stderr to LOG_FILE
-    # Usage: run_logged "Label" cmd arg1 arg2 ...
-    run_logged() {
+    # Synchronous step: print label, run, show result, dump log tail on failure
+    py_step() {
         local label="$1"; shift
-        "$@" >> "$LOG_FILE" 2>&1 &
-        spinner $! "$label"
-        local rc=$?
-        if [ $rc -ne 0 ]; then
-            echo -e "  ${RED}✘ '$label' failed (exit $rc). Last 10 lines of log:${NC}" >&2
-            tail -10 "$LOG_FILE" | sed 's/^/    /' >&2
+        printf "  ${CYAN}%-52s${NC}" "$label"
+        "$@" >> "$LOG_FILE" 2>&1
+        rc=$?
+        if [ $rc -eq 0 ]; then
+            printf " [${GREEN}✔${NC}]\n"
+        else
+            printf " [${RED}✘${NC}]\n"
+            echo -e "\n  ${RED}✘ Step failed (exit $rc). Showing last 15 lines of log:${NC}" >&2
+            tail -15 "$LOG_FILE" | sed 's/^/    /' >&2
             exit $rc
         fi
     }
 
-    # --- Build dependencies ---
-    run_logged "Installing build dependencies" \
+    # 1 — Build dependencies (synchronous — yum must not be backgrounded)
+    py_step "Installing build dependencies..." \
         yum install -y gcc make openssl-devel bzip2-devel libffi-devel \
                        zlib-devel readline-devel sqlite-devel xz-devel wget curl
 
-    # --- Download source ---
-    run_logged "Downloading Python ${PYTHON_VER}" \
-        curl -fL -o "/tmp/Python-${PYTHON_VER}.tgz" "$PYTHON_SRC_URL"
+    # 2 — Download
+    py_step "Downloading Python ${PYTHON_VER}..." \
+        curl -fL --retry 3 --retry-delay 2 \
+             -o "/tmp/Python-${PYTHON_VER}.tgz" "$PYTHON_SRC_URL"
 
-    # --- Extract ---
+    # 3 — Extract
     mkdir -p /usr/local/src
-    tar -xzf "/tmp/Python-${PYTHON_VER}.tgz" -C /usr/local/src/ >> "$LOG_FILE" 2>&1
-    handle_error $? "Failed to extract Python source."
+    py_step "Extracting source..." \
+        tar -xzf "/tmp/Python-${PYTHON_VER}.tgz" -C /usr/local/src/
 
-    # --- Configure ---
-    run_logged "Configuring Python ${PYTHON_VER}" \
+    # 4 — Configure
+    py_step "Configuring Python ${PYTHON_VER}..." \
         bash -c "cd '$PYTHON_SRC_DIR' && ./configure --enable-optimizations --with-ensurepip=install"
 
-    # --- Compile ---
-    run_logged "Compiling Python ${PYTHON_VER} (may take several minutes)" \
-        bash -c "cd '$PYTHON_SRC_DIR' && make -j$(nproc)"
+    # 5 — Compile  (spinner-safe: long step, backgrounded AFTER log redirect is set up)
+    printf "  ${CYAN}%-52s${NC}" "Compiling Python ${PYTHON_VER} (may take minutes)..."
+    (cd "$PYTHON_SRC_DIR" && make -j"$(nproc)") >> "$LOG_FILE" 2>&1 &
+    spinner $!
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        printf "\n"; tail -15 "$LOG_FILE" | sed 's/^/    /' >&2; exit $rc
+    fi
 
-    # --- Install (altinstall preserves system python2) ---
-    run_logged "Installing Python ${PYTHON_VER}" \
+    # 6 — Install (altinstall keeps system python2 intact)
+    py_step "Installing Python ${PYTHON_VER} (altinstall)..." \
         bash -c "cd '$PYTHON_SRC_DIR' && make altinstall"
 
-    # Symlink python3 → python3.11
-    [ ! -f /usr/bin/python3  ] && ln -s /usr/local/bin/python3.11  /usr/bin/python3
-    [ ! -f /usr/bin/pip3     ] && ln -s /usr/local/bin/pip3.11     /usr/bin/pip3     2>/dev/null || true
+    # 7 — Symlinks
+    [ ! -f /usr/bin/python3 ] && ln -sf /usr/local/bin/python3.11 /usr/bin/python3
+    [ ! -f /usr/bin/pip3    ] && ln -sf /usr/local/bin/pip3.11    /usr/bin/pip3 2>/dev/null || true
 
-    # Cleanup
+    # 8 — Cleanup
     rm -f "/tmp/Python-${PYTHON_VER}.tgz"
 }
 
