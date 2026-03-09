@@ -243,7 +243,8 @@ install_python3_centos7() {
     local PYTHON_SRC_URL="https://www.python.org/ftp/python/${PYTHON_VER}/Python-${PYTHON_VER}.tgz"
     local PYTHON_SRC_DIR="/usr/local/src/Python-${PYTHON_VER}"
     local RPM_DIR="/tmp/cs-rpms"
-    local VAULT="https://vault.centos.org/7.9.2009/os/x86_64/Packages"
+    local VAULT_OS="https://vault.centos.org/7.9.2009/os/x86_64/Packages"
+    local VAULT_UPD="https://vault.centos.org/7.9.2009/updates/x86_64/Packages"
     local rc
 
     py_step() {
@@ -261,69 +262,96 @@ install_python3_centos7() {
         fi
     }
 
-    # wget_rpm: download a single RPM from vault via wget (NSS-based, works on CentOS 7)
     wget_rpm() {
-        local pkg="$1"
+        local base="$1"
+        local pkg="$2"
+        local dest="${RPM_DIR}/${pkg}"
         wget -q --tries=3 --timeout=60 --no-check-certificate \
-             -O "${RPM_DIR}/${pkg}" "${VAULT}/${pkg}"
+             -O "$dest" "${base}/${pkg}"
+        # Verify it's actually an RPM (not an HTML 404 page)
+        if ! file "$dest" 2>/dev/null | grep -q "RPM"; then
+            echo "WARN: $pkg downloaded but is not a valid RPM — removing" >> "$LOG_FILE"
+            rm -f "$dest"
+            return 1
+        fi
+        return 0
     }
 
     # ----------------------------------------------------------------
-    # 1 — Download build dependency RPMs directly via wget (bypass yum/curl)
+    # 1 — Download build dependency RPMs via wget (bypass yum/curl)
+    #     Sources:
+    #       OS path    = base packages (stable versions, no el7_9 suffix)
+    #       Updates path = security-updated packages (el7_9 suffix)
     # ----------------------------------------------------------------
     mkdir -p "$RPM_DIR"
 
-    # Full list of RPMs needed to compile Python 3.11 on CentOS 7
-    local RPMS=(
-        "gcc-4.8.5-44.el7.x86_64.rpm"
-        "glibc-devel-2.17-326.el7_9.x86_64.rpm"
-        "glibc-headers-2.17-326.el7_9.x86_64.rpm"
-        "kernel-headers-3.10.0-1160.108.1.el7.x86_64.rpm"
-        "libmpc-1.0.1-3.el7.x86_64.rpm"
-        "mpfr-3.1.1-4.el7.x86_64.rpm"
-        "cpp-4.8.5-44.el7.x86_64.rpm"
-        "make-3.82-24.el7.x86_64.rpm"
-        "openssl-devel-1.0.2k-26.el7_9.x86_64.rpm"
-        "openssl-libs-1.0.2k-26.el7_9.x86_64.rpm"
-        "openssl-1.0.2k-26.el7_9.x86_64.rpm"
-        "keyutils-libs-devel-1.5.8-3.el7.x86_64.rpm"
-        "krb5-devel-1.15.1-55.el7_9.x86_64.rpm"
-        "krb5-libs-1.15.1-55.el7_9.x86_64.rpm"
-        "libcom_err-devel-1.42.9-19.el7.x86_64.rpm"
-        "libkadm5-1.15.1-55.el7_9.x86_64.rpm"
-        "libselinux-devel-2.5-15.el7.x86_64.rpm"
-        "libsepol-devel-2.5-10.el7.x86_64.rpm"
-        "libverto-devel-0.2.5-4.el7.x86_64.rpm"
-        "pcre-devel-8.32-17.el7.x86_64.rpm"
-        "zlib-devel-1.2.7-21.el7_9.x86_64.rpm"
-        "bzip2-devel-1.0.6-13.el7.x86_64.rpm"
-        "bzip2-libs-1.0.6-13.el7.x86_64.rpm"
-        "libffi-devel-3.0.13-19.el7.x86_64.rpm"
-        "readline-devel-6.2-11.el7.x86_64.rpm"
-        "readline-6.2-11.el7.x86_64.rpm"
-        "sqlite-devel-3.7.17-8.el7_7.1.x86_64.rpm"
-        "sqlite-3.7.17-8.el7_7.1.x86_64.rpm"
-        "xz-devel-5.2.2-2.el7_9.x86_64.rpm"
-        "xz-libs-5.2.2-2.el7_9.x86_64.rpm"
-        "ncurses-devel-5.9-14.20130511.el7_4.x86_64.rpm"
-        "ncurses-libs-5.9-14.20130511.el7_4.x86_64.rpm"
-    )
-
     printf "  ${CYAN}%-52s${NC}" "Downloading build dependency RPMs..."
     local failed=0
-    for pkg in "${RPMS[@]}"; do
-        wget_rpm "$pkg" >> "$LOG_FILE" 2>&1 || { echo "WARN: failed to download $pkg" >> "$LOG_FILE"; failed=$((failed+1)); }
+
+    # --- from OS repo ---
+    for pkg in \
+        "cpp-4.8.5-44.el7.x86_64.rpm" \
+        "gcc-4.8.5-44.el7.x86_64.rpm" \
+        "glibc-devel-2.17-317.el7.x86_64.rpm" \
+        "glibc-headers-2.17-317.el7.x86_64.rpm" \
+        "kernel-headers-3.10.0-1160.el7.x86_64.rpm" \
+        "libmpc-1.0.1-3.el7.x86_64.rpm" \
+        "mpfr-3.1.1-4.el7.x86_64.rpm" \
+        "make-3.82-24.el7.x86_64.rpm" \
+        "bzip2-devel-1.0.6-13.el7.x86_64.rpm" \
+        "bzip2-libs-1.0.6-13.el7.x86_64.rpm" \
+        "libffi-devel-3.0.13-19.el7.x86_64.rpm" \
+        "readline-devel-6.2-11.el7.x86_64.rpm" \
+        "readline-6.2-11.el7.x86_64.rpm" \
+        "ncurses-devel-5.9-14.20130511.el7_4.x86_64.rpm" \
+        "ncurses-libs-5.9-14.20130511.el7_4.x86_64.rpm" \
+        "pcre-devel-8.32-17.el7.x86_64.rpm" \
+        "libselinux-devel-2.5-15.el7.x86_64.rpm" \
+        "libsepol-devel-2.5-10.el7.x86_64.rpm" \
+        "keyutils-libs-devel-1.5.8-3.el7.x86_64.rpm" \
+        "libverto-devel-0.2.5-4.el7.x86_64.rpm" \
+        "libcom_err-devel-1.42.9-19.el7.x86_64.rpm" \
+        "sqlite-devel-3.7.17-8.el7_7.1.x86_64.rpm" \
+        "sqlite-3.7.17-8.el7_7.1.x86_64.rpm"
+    do
+        wget_rpm "$VAULT_OS" "$pkg" >> "$LOG_FILE" 2>&1 \
+            || { warn_msg="WARN: failed $pkg (os)"; echo "$warn_msg" >> "$LOG_FILE"; failed=$((failed+1)); }
     done
+
+    # --- from Updates repo (el7_9 security versions) ---
+    for pkg in \
+        "openssl-1.0.2k-26.el7_9.x86_64.rpm" \
+        "openssl-libs-1.0.2k-26.el7_9.x86_64.rpm" \
+        "openssl-devel-1.0.2k-26.el7_9.x86_64.rpm" \
+        "zlib-devel-1.2.7-21.el7_9.x86_64.rpm" \
+        "xz-devel-5.2.2-2.el7_9.x86_64.rpm" \
+        "xz-libs-5.2.2-2.el7_9.x86_64.rpm" \
+        "krb5-libs-1.15.1-55.el7_9.x86_64.rpm" \
+        "krb5-devel-1.15.1-55.el7_9.x86_64.rpm" \
+        "libkadm5-1.15.1-55.el7_9.x86_64.rpm"
+    do
+        wget_rpm "$VAULT_UPD" "$pkg" >> "$LOG_FILE" 2>&1 \
+            || { echo "WARN: failed $pkg (updates)" >> "$LOG_FILE"; failed=$((failed+1)); }
+    done
+
     if [ $failed -eq 0 ]; then
         printf " [${GREEN}✔${NC}]\n"
     else
         printf " [${YELLOW}⚠ $failed skipped${NC}]\n"
-        warn "$failed RPMs could not be downloaded — install may still succeed if already present."
+        warn "$failed RPMs could not be downloaded — continuing, may already be installed."
     fi
 
-    # Install all downloaded RPMs at once, ignore already-installed conflicts
-    py_step "Installing build dependency RPMs..." \
-        rpm -Uvh --nodeps --replacepkgs ${RPM_DIR}/*.rpm
+    # Count valid RPMs actually downloaded
+    local rpm_count
+    rpm_count=$(ls "${RPM_DIR}"/*.rpm 2>/dev/null | wc -l)
+    if [ "$rpm_count" -eq 0 ]; then
+        error "No valid RPMs downloaded — cannot continue."
+        exit 1
+    fi
+
+    # Install all valid RPMs — nosignature skips GPG check, nodeps skips dep resolution
+    py_step "Installing $rpm_count build dependency RPMs..." \
+        rpm -Uvh --nosignature --nodeps --replacepkgs ${RPM_DIR}/*.rpm
 
     # ----------------------------------------------------------------
     # 2 — Download Python source from python.org via wget
