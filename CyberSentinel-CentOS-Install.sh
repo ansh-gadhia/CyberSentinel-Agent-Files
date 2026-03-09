@@ -352,10 +352,39 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 # ============================================================
 step "Step 3 │ Prerequisites"
 
-$PKG_MANAGER install -y wget nmap-ncat &>>"$LOG_FILE" &
-spinner $! "Installing prerequisites (wget, nc)"
-handle_error $? "Failed to install prerequisites."
-success "Prerequisites ready."
+if [ "$OS_MAJOR" = "7" ]; then
+    # CentOS 7 — yum is broken (vault TLS), install via wget+rpm directly
+    VAULT_OS="https://vault.centos.org/7.9.2009/os/x86_64/Packages"
+    VAULT_UPD="https://vault.centos.org/7.9.2009/updates/x86_64/Packages"
+    PREREQ_DIR="/tmp/cs-prereq-rpms"
+    mkdir -p "$PREREQ_DIR"
+
+    if ! command -v wget &>/dev/null; then
+        printf "  ${CYAN}%-52s${NC}" "Downloading wget..."
+        wget_get "$PREREQ_DIR/wget.rpm" \
+            "${VAULT_UPD}/wget-1.14-18.el7_6.1.x86_64.rpm" >> "$LOG_FILE" 2>&1
+        rpm -Uvh --nosignature --nodeps --replacepkgs \
+            "$PREREQ_DIR/wget.rpm" >> "$LOG_FILE" 2>&1 \
+            && printf " [${GREEN}✔${NC}]\n" || printf " [${YELLOW}already present${NC}]\n"
+    fi
+
+    if ! command -v nc &>/dev/null; then
+        printf "  ${CYAN}%-52s${NC}" "Downloading nmap-ncat..."
+        wget_get "$PREREQ_DIR/nmap-ncat.rpm" \
+            "${VAULT_OS}/nmap-ncat-6.40-19.el7.x86_64.rpm" >> "$LOG_FILE" 2>&1
+        rpm -Uvh --nosignature --nodeps --replacepkgs \
+            "$PREREQ_DIR/nmap-ncat.rpm" >> "$LOG_FILE" 2>&1 \
+            && printf " [${GREEN}✔${NC}]\n" || printf " [${YELLOW}already present${NC}]\n"
+    fi
+
+    rm -rf "$PREREQ_DIR"
+    success "Prerequisites ready (CentOS 7 — installed via RPM)."
+else
+    $PKG_MANAGER install -y wget nmap-ncat &>>"$LOG_FILE" &
+    spinner $! "Installing prerequisites (wget, nc)"
+    handle_error $? "Failed to install prerequisites."
+    success "Prerequisites ready."
+fi
 
 # ============================================================
 # STEP 4 — Agent Package
@@ -389,8 +418,57 @@ YARA_URL="https://github.com/VirusTotal/yara/archive/${YARA_TARBALL}"
 YARA_SRC_DIR="/usr/local/bin/yara-${YARA_VERSION}"
 YARA_RULES_DIR="/tmp/yara/rules"
 
-$PKG_MANAGER install -y make gcc autoconf automake libtool openssl-devel pkgconfig jq &>>"$LOG_FILE" &
-spinner $! "Installing YARA build dependencies"
+if [ "$OS_MAJOR" = "7" ]; then
+    # CentOS 7 — download YARA build deps via wget+rpm (yum/vault TLS broken)
+    VAULT_OS="https://vault.centos.org/7.9.2009/os/x86_64/Packages"
+    VAULT_UPD="https://vault.centos.org/7.9.2009/updates/x86_64/Packages"
+    YARA_DEP_DIR="/tmp/cs-yara-rpms"
+    mkdir -p "$YARA_DEP_DIR"
+
+    printf "  ${CYAN}%-52s${NC}" "Downloading YARA build dependency RPMs..."
+    failed_yara=0
+    # OS repo packages
+    for pkg_url in \
+        "${VAULT_OS}/gcc-4.8.5-44.el7.x86_64.rpm" \
+        "${VAULT_OS}/cpp-4.8.5-44.el7.x86_64.rpm" \
+        "${VAULT_OS}/libmpc-1.0.1-3.el7.x86_64.rpm" \
+        "${VAULT_OS}/mpfr-3.1.1-4.el7.x86_64.rpm" \
+        "${VAULT_OS}/make-3.82-24.el7.x86_64.rpm" \
+        "${VAULT_OS}/autoconf-2.69-11.el7.noarch.rpm" \
+        "${VAULT_OS}/automake-1.13.4-3.el7.noarch.rpm" \
+        "${VAULT_OS}/libtool-2.4.2-22.el7_3.x86_64.rpm" \
+        "${VAULT_OS}/pkgconfig-0.27.1-4.el7.x86_64.rpm" \
+        "${VAULT_OS}/jq-1.6-2.el7.x86_64.rpm" \
+        "${VAULT_OS}/oniguruma-5.9.5-3.el7.x86_64.rpm"
+    do
+        fname=$(basename "$pkg_url")
+        wget_get "$YARA_DEP_DIR/$fname" "$pkg_url" >> "$LOG_FILE" 2>&1 || failed_yara=$((failed_yara+1))
+    done
+    # Updates repo packages
+    for pkg_url in \
+        "${VAULT_UPD}/openssl-1.0.2k-26.el7_9.x86_64.rpm" \
+        "${VAULT_UPD}/openssl-libs-1.0.2k-26.el7_9.x86_64.rpm" \
+        "${VAULT_UPD}/openssl-devel-1.0.2k-26.el7_9.x86_64.rpm" \
+        "${VAULT_UPD}/glibc-devel-2.17-326.el7_9.x86_64.rpm" \
+        "${VAULT_UPD}/glibc-headers-2.17-326.el7_9.x86_64.rpm" \
+        "${VAULT_UPD}/kernel-headers-3.10.0-1160.119.1.el7.x86_64.rpm"
+    do
+        fname=$(basename "$pkg_url")
+        wget_get "$YARA_DEP_DIR/$fname" "$pkg_url" >> "$LOG_FILE" 2>&1 || failed_yara=$((failed_yara+1))
+    done
+
+    [ $failed_yara -eq 0 ] && printf " [${GREEN}✔${NC}]\n" \
+        || printf " [${YELLOW}⚠ $failed_yara skipped${NC}]\n"
+
+    rpm -Uvh --nosignature --nodeps --replacepkgs ${YARA_DEP_DIR}/*.rpm >> "$LOG_FILE" 2>&1 &
+    spinner $! "Installing YARA build dependency RPMs"
+    # Non-fatal — some may already be installed
+    rm -rf "$YARA_DEP_DIR"
+else
+    $PKG_MANAGER install -y make gcc autoconf automake libtool openssl-devel pkgconfig jq &>>"$LOG_FILE" &
+    spinner $! "Installing YARA build dependencies"
+    handle_error $? "Failed to install YARA build dependencies."
+fi
 handle_error $? "Failed to install YARA build dependencies."
 
 wget_get "$YARA_TARBALL" "$YARA_URL" >> "$LOG_FILE" 2>&1 &
