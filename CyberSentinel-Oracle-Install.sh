@@ -467,6 +467,12 @@ if ! $SURICATA_SKIPPED; then
     sed -i "s/AgentIP/$AgentIP/g" /etc/suricata/suricata.yaml
     sed -i "s/InterfaceName/$InterfaceName/g" /etc/suricata/suricata.yaml
 
+    # Suricata 7 does not accept "KiB/MiB/GiB" size format — convert to plain kb/mb
+    sed -i 's/\([0-9]\+\) KiB/\1kb/g' /etc/suricata/suricata.yaml
+    sed -i 's/\([0-9]\+\) MiB/\1mb/g' /etc/suricata/suricata.yaml
+    sed -i 's/\([0-9]\+\) GiB/\1gb/g' /etc/suricata/suricata.yaml
+    success "Suricata yaml size values normalised for Suricata 7."
+
     systemctl enable suricata &>>"$LOG_FILE"
     if suricata -T -c /etc/suricata/suricata.yaml &>>"$LOG_FILE"; then
         systemctl restart suricata &>>"$LOG_FILE" &
