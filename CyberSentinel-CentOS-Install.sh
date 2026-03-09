@@ -188,33 +188,33 @@ success "Base URL: ${BASE_URL}"
 fix_centos7_repos() {
     local REPO_DIR="/etc/yum.repos.d"
 
-    printf "  ${CYAN}%-52s${NC}" "Redirecting repos to vault.centos.org (HTTPS)..."
+    printf "  ${CYAN}%-52s${NC}" "Fixing EOL repos for CentOS 7..."
 
-    # Rewrite ALL repo files — handles CentOS-Vault.repo, CentOS-Base.repo, or any variant
+    # CentOS 7's bundled libcurl/openssl is too old for TLS 1.3.
+    # Keep baseurls as plain http:// so yum's internal curl can connect,
+    # and disable sslverify globally so cert errors don't block anything.
     for repo_file in "$REPO_DIR"/CentOS-*.repo; do
         [ -f "$repo_file" ] || continue
-        # 1. Kill mirrorlist lines
+        # Disable mirrorlist (dead)
         sed -i 's/^mirrorlist=/#mirrorlist=/g' "$repo_file"
-        # 2. http://vault.centos.org → https://vault.centos.org  (exact match on your system)
-        sed -i 's|^baseurl=http://vault\.centos\.org|baseurl=https://vault.centos.org|g' "$repo_file"
-        # 3. http://mirror.centos.org → https://vault.centos.org  (fallback for other variants)
-        sed -i 's|^baseurl=http://mirror\.centos\.org/centos|baseurl=https://vault.centos.org/centos|g' "$repo_file"
-        # 4. Uncomment commented baseurls and rewrite them
-        sed -i 's|^#baseurl=http://vault\.centos\.org|baseurl=https://vault.centos.org|g' "$repo_file"
-        sed -i 's|^#baseurl=http://mirror\.centos\.org/centos|baseurl=https://vault.centos.org/centos|g' "$repo_file"
+        # Downgrade any https://vault back to http:// (yum curl too old for TLS 1.3)
+        sed -i 's|^baseurl=https://vault\.centos\.org|baseurl=http://vault.centos.org|g' "$repo_file"
+        # Rewrite mirror.centos.org variants to http vault
+        sed -i 's|^baseurl=http://mirror\.centos\.org/centos|baseurl=http://vault.centos.org/centos|g' "$repo_file"
+        sed -i 's|^#baseurl=http://mirror\.centos\.org/centos|baseurl=http://vault.centos.org/centos|g' "$repo_file"
+        sed -i 's|^#baseurl=http://vault\.centos\.org|baseurl=http://vault.centos.org|g' "$repo_file"
+        # Disable SSL verification per-repo
+        grep -q "^sslverify=" "$repo_file" || echo "sslverify=0" >> "$repo_file"
     done
 
-    # Show what the baseurls look like now (debug aid logged only)
+    # Disable SSL verification globally in yum.conf
+    grep -q "^sslverify=" /etc/yum.conf \
+        && sed -i 's/^sslverify=.*/sslverify=0/' /etc/yum.conf \
+        || echo "sslverify=0" >> /etc/yum.conf
+
+    # Log final baseurls for debugging
     echo "=== Repo baseurls after fix ===" >> "$LOG_FILE"
     grep -r "^baseurl=" "$REPO_DIR"/CentOS-*.repo >> "$LOG_FILE" 2>&1 || true
-
-    # Abort if any http:// baseurl still remains
-    if grep -r "^baseurl=http://" "$REPO_DIR"/CentOS-*.repo > /dev/null 2>&1; then
-        printf " [${RED}✘${NC}]\n"
-        error "Repo fix failed — http:// baseurls still present:"
-        grep -r "^baseurl=http://" "$REPO_DIR"/CentOS-*.repo | sed 's/^/    /' >&2
-        exit 1
-    fi
 
     # Clear stale yum metadata
     yum clean all >> "$LOG_FILE" 2>&1
