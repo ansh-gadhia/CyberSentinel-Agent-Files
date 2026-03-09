@@ -1,15 +1,20 @@
 #!/bin/bash
 
 # ============================================================
-# CyberSentinel Installer Script for CentOS (7 / 8 / 9 / Stream)
+# CyberSentinel Installer Script for CentOS (8 / 9 / 10+)
 # ============================================================
 
 LOG_DIR="/opt/cybersentinel"
 LOG_FILE="$LOG_DIR/install.log"
 GITHUB_REPO="cybersentinel-06/CyberSentinel-SIEM"
+AGENT_PATH="CENTOS-AGENT"
 BIN_DIR="/var/ossec/active-response/bin"
 WAZUH_AGENT_PORT=1514
+WAZUH_RPM="wazuh-agent_4.14.0-1.x86_64.rpm"
+WAZUH_PKG_URL="https://packages.wazuh.com/4.x/yum/wazuh-agent-4.14.0-1.x86_64.rpm"
 LOGROTATE_CONF="/etc/logrotate.d/cybersentinel"
+YARA_VERSION="4.5.5"
+YARA_RULES_DIR="/tmp/yara/rules"
 
 # ============================================================
 # Colours
@@ -41,9 +46,8 @@ wget_api() {
 wget_status() {
     local url="$1"
     local header="${2:-}"
-    local tmp
+    local tmp code
     tmp=$(mktemp)
-    local code
     if [ -n "$header" ]; then
         code=$(wget -q --tries=1 --timeout=15 --no-check-certificate \
                     --server-response --header="$header" \
@@ -138,8 +142,7 @@ step "Step 0 │ GitHub Token Validation"
 read_masked() {
     local __var="$1"
     local __prompt="$2"
-    local __input=""
-    local __char=""
+    local __input="" __char=""
     printf "%s" "$__prompt"
     stty -echo -icanon min 1 time 0
     while IFS= read -r -d '' -n1 __char 2>/dev/null; do
@@ -166,9 +169,7 @@ validate_github_token() {
     local auth_header="Authorization: Bearer ${token}"
     local http_code
     http_code=$(wget_status "https://api.github.com/user" "$auth_header")
-    if [ "$http_code" != "200" ]; then
-        return 1
-    fi
+    [ "$http_code" != "200" ] && return 1
     http_code=$(wget_status "https://api.github.com/repos/$GITHUB_REPO" "$auth_header")
     if [ "$http_code" = "200" ]; then
         return 0
@@ -232,22 +233,13 @@ if [ -z "$OS_MAJOR" ]; then
     exit 1
 fi
 
-success "Detected: CentOS ${OS_MAJOR}"
-
-if [ "$OS_MAJOR" = "7" ]; then
-    AGENT_PATH="CENTOS-7-AGENT"
-    WAZUH_RPM="wazuh-agent_4.14.0-1.x86_64.rpm"
-    WAZUH_PKG_URL="https://packages.wazuh.com/4.x/yum/wazuh-agent-4.14.0-1.x86_64.rpm"
-    PKG_MANAGER="yum"
-    success "Agent path: ${AGENT_PATH} (CentOS 7)"
-else
-    AGENT_PATH="CENTOS-AGENT"
-    WAZUH_RPM="wazuh-agent_4.14.0-1.x86_64.rpm"
-    WAZUH_PKG_URL="https://packages.wazuh.com/4.x/yum/wazuh-agent-4.14.0-1.x86_64.rpm"
-    PKG_MANAGER="dnf"
-    success "Agent path: ${AGENT_PATH} (CentOS ${OS_MAJOR})"
+if [ "$OS_MAJOR" -lt 8 ]; then
+    error "CentOS ${OS_MAJOR} is not supported. This installer requires CentOS 8, 9, or 10+."
+    exit 1
 fi
 
+success "Detected: CentOS ${OS_MAJOR}"
+success "Agent path: ${AGENT_PATH}"
 BASE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/AGENTS/${AGENT_PATH}"
 success "Base URL: ${BASE_URL}"
 
@@ -326,7 +318,7 @@ if $AGENT_EXISTS; then
         1)
             warn "Stopping and removing existing installation..."
             systemctl stop cybersentinel-agent wazuh-agent &>/dev/null
-            $PKG_MANAGER remove -y wazuh-agent &>>"$LOG_FILE"
+            dnf remove -y wazuh-agent &>>"$LOG_FILE"
             rm -f /etc/systemd/system/cybersentinel-agent.service
             systemctl daemon-reload &>>"$LOG_FILE"
             success "Old installation removed."
@@ -352,39 +344,10 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 # ============================================================
 step "Step 3 │ Prerequisites"
 
-if [ "$OS_MAJOR" = "7" ]; then
-    # CentOS 7 — yum repos are broken (EOL/vault TLS), install only what's missing via direct RPM
-    VAULT_OS="https://vault.centos.org/7.9.2009/os/x86_64/Packages"
-    VAULT_UPD="https://vault.centos.org/7.9.2009/updates/x86_64/Packages"
-    PREREQ_DIR="/tmp/cs-prereq-rpms"
-    mkdir -p "$PREREQ_DIR"
-
-    if ! command -v wget &>/dev/null; then
-        printf "  ${CYAN}%-52s${NC}" "Downloading wget..."
-        wget_get "$PREREQ_DIR/wget.rpm" \
-            "${VAULT_UPD}/wget-1.14-18.el7_6.1.x86_64.rpm" >> "$LOG_FILE" 2>&1
-        rpm -Uvh --nosignature --nodeps --replacepkgs \
-            "$PREREQ_DIR/wget.rpm" >> "$LOG_FILE" 2>&1 \
-            && printf " [${GREEN}✔${NC}]\n" || printf " [${YELLOW}already present${NC}]\n"
-    fi
-
-    if ! command -v nc &>/dev/null; then
-        printf "  ${CYAN}%-52s${NC}" "Downloading nmap-ncat..."
-        wget_get "$PREREQ_DIR/nmap-ncat.rpm" \
-            "${VAULT_OS}/nmap-ncat-6.40-19.el7.x86_64.rpm" >> "$LOG_FILE" 2>&1
-        rpm -Uvh --nosignature --nodeps --replacepkgs \
-            "$PREREQ_DIR/nmap-ncat.rpm" >> "$LOG_FILE" 2>&1 \
-            && printf " [${GREEN}✔${NC}]\n" || printf " [${YELLOW}already present${NC}]\n"
-    fi
-
-    rm -rf "$PREREQ_DIR"
-    success "Prerequisites ready (CentOS 7)."
-else
-    $PKG_MANAGER install -y wget nmap-ncat &>>"$LOG_FILE" &
-    spinner $! "Installing prerequisites (wget, nc)"
-    handle_error $? "Failed to install prerequisites."
-    success "Prerequisites ready."
-fi
+dnf install -y wget nmap-ncat &>>"$LOG_FILE" &
+spinner $! "Installing prerequisites (wget, nc)"
+handle_error $? "Failed to install prerequisites."
+success "Prerequisites ready."
 
 # ============================================================
 # STEP 4 — Agent Package
@@ -410,93 +373,66 @@ fi
 # ============================================================
 # STEP 5 — YARA v4.5.5
 # ============================================================
-step "Step 5 │ YARA v4.5.5 Installation"
+step "Step 5 │ YARA v${YARA_VERSION} Installation"
 
-YARA_RULES_DIR="/tmp/yara/rules"
+YARA_TARBALL="v${YARA_VERSION}.tar.gz"
+YARA_URL="https://github.com/VirusTotal/yara/archive/${YARA_TARBALL}"
+YARA_SRC_DIR="/usr/local/bin/yara-${YARA_VERSION}"
 
-if [ "$OS_MAJOR" = "7" ]; then
-    warn "YARA binary installation skipped on CentOS 7 (EOL — build toolchain unavailable)."
-    YARA_VER="skipped"
+dnf install -y make gcc autoconf automake libtool openssl-devel pkgconfig jq &>>"$LOG_FILE" &
+spinner $! "Installing YARA build dependencies"
+handle_error $? "Failed to install YARA build dependencies."
 
-    mkdir -p "$YARA_RULES_DIR"
-    wget -q --tries=3 --timeout=60 --no-check-certificate \
-         --header='Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' \
-         --header='Referer: https://valhalla.nextron-systems.com/' \
-         --header='DNT: 1' \
-         --post-data='demo=demo&apikey=1111111111111111111111111111111111111111111111111111111111111111&format=text' \
-         -O "${YARA_RULES_DIR}/yara_rules.yar" \
-         'https://valhalla.nextron-systems.com/api/v1/get' &
-    spinner $! "Downloading Valhalla YARA rules"
-    handle_error $? "Failed to download Valhalla YARA rules."
+wget_get "$YARA_TARBALL" "$YARA_URL" >> "$LOG_FILE" 2>&1 &
+spinner $! "Downloading YARA v${YARA_VERSION}"
+handle_error $? "Failed to download YARA."
 
-    if [ -s "${YARA_RULES_DIR}/yara_rules.yar" ]; then
-        RULE_COUNT=$(grep -c "^rule " "${YARA_RULES_DIR}/yara_rules.yar" 2>/dev/null || echo "unknown")
-        success "Valhalla rules → ${YARA_RULES_DIR}/yara_rules.yar (${RULE_COUNT} rules)"
-    else
-        warn "Valhalla rules file is empty — check API key or connectivity."
-    fi
+tar -xvzf "$YARA_TARBALL" -C /usr/local/bin/ &>>"$LOG_FILE" && rm -f "$YARA_TARBALL"
+handle_error $? "Failed to extract YARA."
+
+(cd "$YARA_SRC_DIR" && ./bootstrap.sh) &>>"$LOG_FILE" &
+spinner $! "Bootstrapping YARA"
+handle_error $? "YARA bootstrap failed."
+
+(cd "$YARA_SRC_DIR" && ./configure) &>>"$LOG_FILE" &
+spinner $! "Configuring YARA"
+handle_error $? "YARA configure failed."
+
+(cd "$YARA_SRC_DIR" && make) &>>"$LOG_FILE" &
+spinner $! "Compiling YARA"
+handle_error $? "YARA compilation failed."
+
+(cd "$YARA_SRC_DIR" && make install) &>>"$LOG_FILE" &
+spinner $! "Installing YARA"
+handle_error $? "YARA install failed."
+
+(cd "$YARA_SRC_DIR" && make check) &>>"$LOG_FILE" &
+spinner $! "Running YARA test suite"
+[ $? -ne 0 ] && warn "YARA tests had failures — continuing anyway." || success "YARA test suite passed."
+
+ldconfig &>>"$LOG_FILE"
+
+YARA_VER=$(/usr/local/bin/yara --version 2>/dev/null || echo "not found")
+[ "$YARA_VER" != "not found" ] \
+    && success "YARA ${YARA_VER} installed → /usr/local/bin/yara" \
+    || warn "YARA binary not found after install."
+
+mkdir -p "$YARA_RULES_DIR"
+wget -q --tries=3 --timeout=60 --no-check-certificate \
+     --header='Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' \
+     --header='Referer: https://valhalla.nextron-systems.com/' \
+     --header='DNT: 1' \
+     --post-data='demo=demo&apikey=1111111111111111111111111111111111111111111111111111111111111111&format=text' \
+     -O "${YARA_RULES_DIR}/yara_rules.yar" \
+     'https://valhalla.nextron-systems.com/api/v1/get' &
+spinner $! "Downloading Valhalla YARA rules"
+handle_error $? "Failed to download Valhalla YARA rules."
+
+if [ -s "${YARA_RULES_DIR}/yara_rules.yar" ]; then
+    RULE_COUNT=$(grep -c "^rule " "${YARA_RULES_DIR}/yara_rules.yar" 2>/dev/null || echo "unknown")
+    success "Valhalla rules → ${YARA_RULES_DIR}/yara_rules.yar (${RULE_COUNT} rules)"
 else
-    YARA_VERSION="4.5.5"
-    YARA_TARBALL="v${YARA_VERSION}.tar.gz"
-    YARA_URL="https://github.com/VirusTotal/yara/archive/${YARA_TARBALL}"
-    YARA_SRC_DIR="/usr/local/bin/yara-${YARA_VERSION}"
-
-    $PKG_MANAGER install -y make gcc autoconf automake libtool openssl-devel pkgconfig jq &>>"$LOG_FILE" &
-    spinner $! "Installing YARA build dependencies"
-    handle_error $? "Failed to install YARA build dependencies."
-
-    wget_get "$YARA_TARBALL" "$YARA_URL" >> "$LOG_FILE" 2>&1 &
-    spinner $! "Downloading YARA v${YARA_VERSION}"
-    handle_error $? "Failed to download YARA."
-
-    tar -xvzf "$YARA_TARBALL" -C /usr/local/bin/ &>>"$LOG_FILE" && rm -f "$YARA_TARBALL"
-    handle_error $? "Failed to extract YARA."
-
-    (cd "$YARA_SRC_DIR" && ./bootstrap.sh) &>>"$LOG_FILE" &
-    spinner $! "Bootstrapping YARA"
-    handle_error $? "YARA bootstrap failed."
-
-    (cd "$YARA_SRC_DIR" && ./configure) &>>"$LOG_FILE" &
-    spinner $! "Configuring YARA"
-    handle_error $? "YARA configure failed."
-
-    (cd "$YARA_SRC_DIR" && make) &>>"$LOG_FILE" &
-    spinner $! "Compiling YARA"
-    handle_error $? "YARA compilation failed."
-
-    (cd "$YARA_SRC_DIR" && make install) &>>"$LOG_FILE" &
-    spinner $! "Installing YARA"
-    handle_error $? "YARA install failed."
-
-    (cd "$YARA_SRC_DIR" && make check) &>>"$LOG_FILE" &
-    spinner $! "Running YARA test suite"
-    [ $? -ne 0 ] && warn "YARA tests had failures — continuing anyway." || success "YARA test suite passed."
-
-    ldconfig &>>"$LOG_FILE"
-    hash -r 2>/dev/null || true
-
-    YARA_VER=$(yara --version 2>/dev/null || /usr/local/bin/yara --version 2>/dev/null || echo "not found")
-    [ "$YARA_VER" != "not found" ] \
-        && success "YARA ${YARA_VER} installed → $(command -v yara 2>/dev/null || echo /usr/local/bin/yara)" \
-        || warn "YARA binary not found after install."
-
-    mkdir -p "$YARA_RULES_DIR"
-    wget -q --tries=3 --timeout=60 --no-check-certificate \
-         --header='Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' \
-         --header='Referer: https://valhalla.nextron-systems.com/' \
-         --header='DNT: 1' \
-         --post-data='demo=demo&apikey=1111111111111111111111111111111111111111111111111111111111111111&format=text' \
-         -O "${YARA_RULES_DIR}/yara_rules.yar" \
-         'https://valhalla.nextron-systems.com/api/v1/get' &
-    spinner $! "Downloading Valhalla YARA rules"
-    handle_error $? "Failed to download Valhalla YARA rules."
-
-    if [ -s "${YARA_RULES_DIR}/yara_rules.yar" ]; then
-        RULE_COUNT=$(grep -c "^rule " "${YARA_RULES_DIR}/yara_rules.yar" 2>/dev/null || echo "unknown")
-        success "Valhalla rules → ${YARA_RULES_DIR}/yara_rules.yar (${RULE_COUNT} rules)"
-    else
-        warn "Valhalla rules file is empty — check API key or connectivity."
-    fi
+    warn "Valhalla rules file is empty — check API key or connectivity."
 fi
 
 # ============================================================
@@ -540,14 +476,7 @@ step "Step 8 │ Active Response Scripts"
 
 mkdir -p "$BIN_DIR"
 
-if [ "$OS_MAJOR" = "7" ]; then
-    # CentOS 7 — skip llm_query.py (no Python 3); keep yara.sh for future use
-    AR_FILES="remove-threat.sh yara.sh"
-else
-    AR_FILES="llm_query.py remove-threat.sh yara.sh"
-fi
-
-for file in $AR_FILES; do
+for file in llm_query.py remove-threat.sh yara.sh; do
     wget_api "$BIN_DIR/$file" "$BASE_URL/ACTIVE-RESPONSE/$file" >> "$LOG_FILE" 2>&1 &
     spinner $! "Fetching $file"
     handle_error $? "Failed to download $file."
@@ -563,32 +492,25 @@ success "Active response scripts installed."
 step "Step 9 │ Suricata IDS"
 
 install_suricata() {
-    if [ "$OS_MAJOR" = "7" ]; then
-        $PKG_MANAGER install -y epel-release &>>"$LOG_FILE"
-        spinner $! "Adding EPEL repository"
-        $PKG_MANAGER install -y suricata &>>"$LOG_FILE"
-    elif [ "$OS_MAJOR" = "8" ]; then
-        $PKG_MANAGER install -y epel-release &>>"$LOG_FILE" &
-        spinner $! "Adding EPEL repository"
-        $PKG_MANAGER config-manager --set-enabled powertools &>>"$LOG_FILE" || \
-        $PKG_MANAGER config-manager --set-enabled PowerTools &>>"$LOG_FILE" || true
-        $PKG_MANAGER install -y suricata &>>"$LOG_FILE"
+    if [ "$OS_MAJOR" = "8" ]; then
+        dnf install -y epel-release &>>"$LOG_FILE"
+        dnf config-manager --set-enabled powertools &>>"$LOG_FILE" || \
+        dnf config-manager --set-enabled PowerTools &>>"$LOG_FILE" || true
+        dnf install -y suricata &>>"$LOG_FILE"
     elif [ "$OS_MAJOR" = "9" ]; then
-        $PKG_MANAGER install -y epel-release &>>"$LOG_FILE" &
-        spinner $! "Adding EPEL repository"
-        $PKG_MANAGER config-manager --set-enabled crb &>>"$LOG_FILE" || true
-        $PKG_MANAGER install -y suricata &>>"$LOG_FILE"
+        dnf install -y epel-release &>>"$LOG_FILE"
+        dnf config-manager --set-enabled crb &>>"$LOG_FILE" || true
+        dnf install -y suricata &>>"$LOG_FILE"
     else
-        # CentOS 10+ — Suricata not yet in EPEL; install via OISF copr
-        warn "CentOS ${OS_MAJOR}: installing Suricata via OISF copr repo..."
-        $PKG_MANAGER install -y dnf-plugins-core &>>"$LOG_FILE"
-        $PKG_MANAGER copr enable @oisf/suricata-stable -y &>>"$LOG_FILE" || true
-        $PKG_MANAGER install -y suricata &>>"$LOG_FILE"
+        # CentOS 10+ — install via OISF copr
+        dnf install -y dnf-plugins-core &>>"$LOG_FILE"
+        dnf copr enable @oisf/suricata-stable -y &>>"$LOG_FILE" || true
+        dnf install -y suricata &>>"$LOG_FILE"
     fi
 }
 
 install_suricata &>>"$LOG_FILE" &
-spinner $! "Installing Suricata"
+spinner $! "Installing Suricata (CentOS ${OS_MAJOR})"
 SURICATA_EXIT=$?
 
 if [ $SURICATA_EXIT -ne 0 ] || ! command -v suricata &>/dev/null; then
@@ -606,9 +528,15 @@ if ! $SURICATA_SKIPPED; then
 
     tar -xzf /tmp/emerging.rules.tar.gz -C /tmp/ &>>"$LOG_FILE"
     mkdir -p /etc/suricata/rules
+    rm -f /etc/suricata/rules/*.rules
     mv /tmp/rules/*.rules /etc/suricata/rules/
+    chown root:suricata /etc/suricata/rules/*.rules
     chmod 640 /etc/suricata/rules/*.rules
     success "Suricata rules installed."
+
+    mkdir -p /var/log/suricata
+    chown -R suricata:suricata /var/log/suricata
+    chmod 750 /var/log/suricata
 
     wget_api /etc/suricata/suricata.yaml "$BASE_URL/suricata.yaml" >> "$LOG_FILE" 2>&1 &
     spinner $! "Downloading suricata.yaml"
@@ -618,9 +546,13 @@ if ! $SURICATA_SKIPPED; then
     sed -i "s/InterfaceName/$InterfaceName/g" /etc/suricata/suricata.yaml
 
     systemctl enable suricata &>>"$LOG_FILE"
-    systemctl restart suricata &>>"$LOG_FILE" &
-    spinner $! "Starting Suricata"
-    success "Suricata configured and running."
+    if suricata -T -c /etc/suricata/suricata.yaml &>>"$LOG_FILE"; then
+        systemctl restart suricata &>>"$LOG_FILE" &
+        spinner $! "Starting Suricata"
+        success "Suricata configured and running."
+    else
+        warn "Suricata config test failed — service not started. Check $LOG_FILE for details."
+    fi
 else
     warn "Suricata setup skipped — install it manually if needed."
 fi
@@ -690,22 +622,24 @@ sleep 2
 CS_STATUS=$(systemctl is-active cybersentinel-agent 2>/dev/null)
 SURICATA_STATUS=$(systemctl is-active suricata 2>/dev/null)
 
-[ "$CS_STATUS"       = "active" ] && success "cybersentinel-agent  → running" || warn "cybersentinel-agent  → ${CS_STATUS}"
+[ "$CS_STATUS" = "active" ] \
+    && success "cybersentinel-agent  → running" \
+    || warn    "cybersentinel-agent  → ${CS_STATUS}"
 
 if $SURICATA_SKIPPED; then
     warn "suricata             → skipped (not available for CentOS ${OS_MAJOR})"
+elif command -v suricata &>/dev/null || [ -f /usr/sbin/suricata ]; then
+    [ "$SURICATA_STATUS" = "active" ] \
+        && success "suricata             → running" \
+        || warn    "suricata             → installed but not running (check: journalctl -u suricata)"
 else
-    [ "$SURICATA_STATUS" = "active" ] && success "suricata             → running" || warn "suricata             → ${SURICATA_STATUS}"
+    warn "suricata             → not installed"
 fi
 
-if [ "$OS_MAJOR" = "7" ]; then
-    warn "yara              → skipped (CentOS 7)"
-else
-    YARA_CHECK=$(yara --version 2>/dev/null || echo "not found")
-    [ "$YARA_CHECK" != "not found" ] \
-        && success "yara              → v${YARA_CHECK}" \
-        || warn "yara              → not found"
-fi
+YARA_CHECK=$(/usr/local/bin/yara --version 2>/dev/null || echo "not found")
+[ "$YARA_CHECK" != "not found" ] \
+    && success "yara                 → v${YARA_CHECK} (/usr/local/bin/yara)" \
+    || warn    "yara                 → not found"
 
 # ============================================================
 # Summary
@@ -719,12 +653,12 @@ echo -e "  Agent Path   : ${BOLD}${AGENT_PATH}${NC}"
 echo -e "  Manager IP   : ${BOLD}${MANAGER_IP}${NC}"
 echo -e "  Agent Name   : ${BOLD}${AGENT_NAME}${NC}"
 echo -e "  Agent IP     : ${BOLD}${AgentIP}${NC} (${InterfaceName})"
-echo -e "  YARA Version : ${BOLD}$( [ "$OS_MAJOR" = "7" ] && echo 'skipped (CentOS 7)' || echo "${YARA_VER}" )${NC}"
+echo -e "  YARA Version : ${BOLD}${YARA_VER}${NC}"
 echo -e "  YARA Rules   : ${BOLD}${YARA_RULES_DIR}/yara_rules.yar${NC}"
 echo -e "  Install Log  : ${BOLD}${LOG_FILE}${NC}"
 echo -e "  Log Rotation : ${BOLD}${LOGROTATE_CONF}${NC}"
 echo -e "  Mode         : ${BOLD}$( $SKIP_PACKAGE && echo 'Repair/Reconfigure' || echo 'Full Install' )${NC}"
-echo -e "  LLM Query    : ${BOLD}$( [ "$OS_MAJOR" = "7" ] && echo 'Skipped (CentOS 7)' || echo 'Installed' )${NC}"
+echo -e "  LLM Query    : ${BOLD}Installed${NC}"
 echo ""
 echo -e "  ${GREEN}${BOLD}CyberSentinel Agent installed successfully! ✔${NC}"
 echo ""
