@@ -12,7 +12,6 @@ BIN_DIR="/var/ossec/active-response/bin"
 WAZUH_AGENT_PORT=1514
 WAZUH_RPM="wazuh-agent_4.14.0-1.x86_64.rpm"
 WAZUH_PKG_URL="https://packages.wazuh.com/4.x/yum/wazuh-agent-4.14.0-1.x86_64.rpm"
-LOGROTATE_CONF="/etc/logrotate.d/cybersentinel"
 YARA_VERSION="4.5.5"
 YARA_RULES_DIR="/tmp/yara/rules"
 
@@ -502,14 +501,14 @@ install_suricata() {
         dnf config-manager --set-enabled crb &>>"$LOG_FILE" || true
         dnf install -y suricata &>>"$LOG_FILE"
     else
-        # CentOS 10+ — install via OISF copr
+        # CentOS 10+ — install via OISF copr (non-interactive)
         dnf install -y dnf-plugins-core &>>"$LOG_FILE"
-        dnf copr enable @oisf/suricata-stable -y &>>"$LOG_FILE" || true
+        dnf copr enable -y @oisf/suricata-stable &>>"$LOG_FILE" || true
         dnf install -y suricata &>>"$LOG_FILE"
     fi
 }
 
-install_suricata &>>"$LOG_FILE" &
+install_suricata &
 spinner $! "Installing Suricata (CentOS ${OS_MAJOR})"
 SURICATA_EXIT=$?
 
@@ -558,35 +557,9 @@ else
 fi
 
 # ============================================================
-# STEP 10 — SELinux & Firewall
+# STEP 10 — Start Service
 # ============================================================
-step "Step 10 │ SELinux & Firewall"
-
-if command -v getenforce &>/dev/null; then
-    SELINUX_STATUS=$(getenforce 2>/dev/null || echo "Unknown")
-    if [ "$SELINUX_STATUS" = "Enforcing" ]; then
-        warn "SELinux Enforcing — setting to Permissive..."
-        setenforce 0 &>>"$LOG_FILE"
-        sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config
-        success "SELinux set to Permissive."
-    else
-        success "SELinux: ${SELINUX_STATUS} — no changes needed."
-    fi
-fi
-
-if systemctl is-active --quiet firewalld 2>/dev/null; then
-    firewall-cmd --permanent --add-port="${WAZUH_AGENT_PORT}/tcp" &>>"$LOG_FILE"
-    firewall-cmd --permanent --add-port="${WAZUH_AGENT_PORT}/udp" &>>"$LOG_FILE"
-    firewall-cmd --reload &>>"$LOG_FILE"
-    success "Firewall: port ${WAZUH_AGENT_PORT} opened."
-else
-    warn "firewalld not running — skipping firewall rule."
-fi
-
-# ============================================================
-# STEP 11 — Start Service
-# ============================================================
-step "Step 11 │ Starting CyberSentinel Agent"
+step "Step 10 │ Starting CyberSentinel Agent"
 
 systemctl enable cybersentinel-agent &>>"$LOG_FILE"
 systemctl start cybersentinel-agent &>>"$LOG_FILE" &
@@ -594,28 +567,9 @@ spinner $! "Starting cybersentinel-agent"
 handle_error $? "Failed to start CyberSentinel Agent."
 
 # ============================================================
-# STEP 12 — Log Rotation
+# STEP 11 — Verification
 # ============================================================
-step "Step 12 │ Log Rotation"
-
-cat > "$LOGROTATE_CONF" <<'EOF'
-/opt/cybersentinel/install.log {
-    weekly
-    rotate 8
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 0640 root root
-    copytruncate
-}
-EOF
-success "Log rotation configured → ${LOGROTATE_CONF}"
-
-# ============================================================
-# STEP 13 — Verification
-# ============================================================
-step "Step 13 │ Post-Install Verification"
+step "Step 11 │ Post-Install Verification"
 
 sleep 2
 
@@ -655,8 +609,6 @@ echo -e "  Agent Name   : ${BOLD}${AGENT_NAME}${NC}"
 echo -e "  Agent IP     : ${BOLD}${AgentIP}${NC} (${InterfaceName})"
 echo -e "  YARA Version : ${BOLD}${YARA_VER}${NC}"
 echo -e "  YARA Rules   : ${BOLD}${YARA_RULES_DIR}/yara_rules.yar${NC}"
-echo -e "  Install Log  : ${BOLD}${LOG_FILE}${NC}"
-echo -e "  Log Rotation : ${BOLD}${LOGROTATE_CONF}${NC}"
 echo -e "  Mode         : ${BOLD}$( $SKIP_PACKAGE && echo 'Repair/Reconfigure' || echo 'Full Install' )${NC}"
 echo -e "  LLM Query    : ${BOLD}Installed${NC}"
 echo ""
