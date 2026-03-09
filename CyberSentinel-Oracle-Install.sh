@@ -7,7 +7,7 @@
 LOG_DIR="/opt/cybersentinel"
 LOG_FILE="$LOG_DIR/install.log"
 GITHUB_REPO="cybersentinel-06/CyberSentinel-SIEM"
-AGENT_PATH="CENTOS-AGENT"
+AGENT_PATH="ORACLE-AGENT"
 BIN_DIR="/var/ossec/active-response/bin"
 WAZUH_AGENT_PORT=1514
 WAZUH_RPM="wazuh-agent_4.14.0-1.x86_64.rpm"
@@ -466,12 +466,7 @@ if ! $SURICATA_SKIPPED; then
 
     sed -i "s/AgentIP/$AgentIP/g" /etc/suricata/suricata.yaml
     sed -i "s/InterfaceName/$InterfaceName/g" /etc/suricata/suricata.yaml
-
-    # Suricata 7 does not accept "KiB/MiB/GiB" size format — convert to plain kb/mb
-    sed -i 's/\([0-9]\+\) KiB/\1kb/g' /etc/suricata/suricata.yaml
-    sed -i 's/\([0-9]\+\) MiB/\1mb/g' /etc/suricata/suricata.yaml
-    sed -i 's/\([0-9]\+\) GiB/\1gb/g' /etc/suricata/suricata.yaml
-    success "Suricata yaml size values normalised for Suricata 7."
+    success "Suricata yaml placeholders replaced."
 
     systemctl enable suricata &>>"$LOG_FILE"
     if suricata -T -c /etc/suricata/suricata.yaml &>>"$LOG_FILE"; then
