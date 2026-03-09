@@ -491,21 +491,9 @@ success "Active response scripts installed."
 step "Step 9 │ Suricata IDS"
 
 install_suricata() {
-    if [ "$OS_MAJOR" = "8" ]; then
-        dnf install -y epel-release &>>"$LOG_FILE"
-        dnf config-manager --set-enabled powertools &>>"$LOG_FILE" || \
-        dnf config-manager --set-enabled PowerTools &>>"$LOG_FILE" || true
-        dnf install -y suricata &>>"$LOG_FILE"
-    elif [ "$OS_MAJOR" = "9" ]; then
-        dnf install -y epel-release &>>"$LOG_FILE"
-        dnf config-manager --set-enabled crb &>>"$LOG_FILE" || true
-        dnf install -y suricata &>>"$LOG_FILE"
-    else
-        # CentOS 10+ — install via OISF copr (non-interactive)
-        dnf install -y dnf-plugins-core &>>"$LOG_FILE"
-        dnf copr enable -y @oisf/suricata-stable &>>"$LOG_FILE" || true
-        dnf install -y suricata &>>"$LOG_FILE"
-    fi
+    dnf update -y &>>"$LOG_FILE"
+    dnf install -y epel-release &>>"$LOG_FILE"
+    dnf install -y suricata &>>"$LOG_FILE"
 }
 
 install_suricata &
