@@ -12,6 +12,49 @@ WAZUH_AGENT_PORT=1514
 LOGROTATE_CONF="/etc/logrotate.d/cybersentinel"
 
 # ============================================================
+# wget helpers
+# ============================================================
+
+# General download: wget_get <output_file> <url>
+wget_get() {
+    local out="$1"
+    local url="$2"
+    wget -q --tries=3 --timeout=60 --no-check-certificate -O "$out" "$url"
+}
+
+# Authenticated GitHub download: wget_api <output_file> <url>
+wget_api() {
+    local out="$1"
+    local url="$2"
+    wget -q --tries=3 --timeout=60 --no-check-certificate \
+         --header="Authorization: Bearer ${GITHUB_TOKEN}" \
+         -O "$out" "$url"
+}
+
+# Return HTTP status code for a URL (with optional auth header)
+# wget_status <url> [header]
+wget_status() {
+    local url="$1"
+    local header="${2:-}"
+    local tmp
+    tmp=$(mktemp)
+    local code
+    if [ -n "$header" ]; then
+        code=$(wget -q --tries=1 --timeout=15 --no-check-certificate \
+                    --server-response --header="$header" \
+                    -O "$tmp" "$url" 2>&1 \
+               | awk '/^  HTTP/{code=$2} END{print code+0}')
+    else
+        code=$(wget -q --tries=1 --timeout=15 --no-check-certificate \
+                    --server-response \
+                    -O "$tmp" "$url" 2>&1 \
+               | awk '/^  HTTP/{code=$2} END{print code+0}')
+    fi
+    rm -f "$tmp"
+    echo "${code:-0}"
+}
+
+# ============================================================
 # Colours
 # ============================================================
 RED='\033[0;31m'
@@ -107,7 +150,6 @@ if [ ! -f /etc/centos-release ] && ! grep -qi "centos" /etc/os-release 2>/dev/nu
     exit 1
 fi
 
-# Parse the major version number
 OS_VERSION_RAW=$(rpm -q --queryformat '%{VERSION}' centos-release 2>/dev/null \
     || grep -oP '(?<=VERSION_ID=")[0-9]+' /etc/os-release \
     || grep -oP '[0-9]+' /etc/centos-release | head -1)
@@ -130,7 +172,6 @@ if [ "$OS_MAJOR" = "7" ]; then
     PKG_MANAGER="yum"
     success "Agent path set to: ${AGENT_PATH} (CentOS 7 — legacy path)"
 else
-    # CentOS 8, 9, Stream, or any future version
     AGENT_PATH="CENTOS-AGENT"
     WAZUH_RPM="wazuh-agent_4.14.0-1.x86_64.rpm"
     WAZUH_PKG_URL="https://packages.wazuh.com/4.x/yum/wazuh-agent-4.14.0-1.x86_64.rpm"
@@ -142,7 +183,7 @@ BASE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/AGENTS/${AGENT_P
 success "Base URL: ${BASE_URL}"
 
 # ============================================================
-# PYTHON 3 — CentOS 7 only (compile from source — most reliable)
+# PYTHON 3 — CentOS 7 only (compile from source via wget)
 # ============================================================
 install_python3_centos7() {
     local PYTHON_VER="3.11.9"
@@ -150,7 +191,7 @@ install_python3_centos7() {
     local PYTHON_SRC_DIR="/usr/local/src/Python-${PYTHON_VER}"
     local rc
 
-    # Synchronous step: print label, run, show result, dump log tail on failure
+    # Synchronous step with inline pass/fail and log tail on error
     py_step() {
         local label="$1"; shift
         printf "  ${CYAN}%-52s${NC}" "$label"
@@ -166,15 +207,15 @@ install_python3_centos7() {
         fi
     }
 
-    # 1 — Build dependencies (synchronous — yum must not be backgrounded)
+    # 1 — Build dependencies
     py_step "Installing build dependencies..." \
         yum install -y gcc make openssl-devel bzip2-devel libffi-devel \
-                       zlib-devel readline-devel sqlite-devel xz-devel wget curl
+                       zlib-devel readline-devel sqlite-devel xz-devel wget
 
-    # 2 — Download
-    py_step "Downloading Python ${PYTHON_VER}..." \
-        curl -fL --retry 3 --retry-delay 2 \
-             -o "/tmp/Python-${PYTHON_VER}.tgz" "$PYTHON_SRC_URL"
+    # 2 — Download Python source from python.org via wget
+    py_step "Downloading Python ${PYTHON_VER} from python.org..." \
+        wget -q --tries=3 --timeout=120 --no-check-certificate \
+             -O "/tmp/Python-${PYTHON_VER}.tgz" "$PYTHON_SRC_URL"
 
     # 3 — Extract
     mkdir -p /usr/local/src
@@ -185,13 +226,15 @@ install_python3_centos7() {
     py_step "Configuring Python ${PYTHON_VER}..." \
         bash -c "cd '$PYTHON_SRC_DIR' && ./configure --enable-optimizations --with-ensurepip=install"
 
-    # 5 — Compile  (spinner-safe: long step, backgrounded AFTER log redirect is set up)
+    # 5 — Compile (backgrounded so spinner runs)
     printf "  ${CYAN}%-52s${NC}" "Compiling Python ${PYTHON_VER} (may take minutes)..."
     (cd "$PYTHON_SRC_DIR" && make -j"$(nproc)") >> "$LOG_FILE" 2>&1 &
     spinner $!
     rc=$?
     if [ $rc -ne 0 ]; then
-        printf "\n"; tail -15 "$LOG_FILE" | sed 's/^/    /' >&2; exit $rc
+        printf "\n"
+        tail -15 "$LOG_FILE" | sed 's/^/    /' >&2
+        exit $rc
     fi
 
     # 6 — Install (altinstall keeps system python2 intact)
@@ -229,7 +272,7 @@ if [ "$OS_MAJOR" = "7" ]; then
         PYTHON3_VER=$("$PYTHON3_BIN" --version 2>&1 | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
         success "Python 3 installed successfully: ${PYTHON3_BIN} (v${PYTHON3_VER})"
 
-        "$PYTHON3_BIN" -m pip install --upgrade pip &>>"$LOG_FILE" &
+        "$PYTHON3_BIN" -m pip install --upgrade pip >> "$LOG_FILE" 2>&1 &
         spinner $! "Upgrading pip"
     fi
 
@@ -303,19 +346,18 @@ read_masked() {
 
 validate_github_token() {
     local token="$1"
+    local auth_header="Authorization: Bearer ${token}"
     local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
-        -H "Authorization: Bearer $token" \
-        "https://api.github.com/user")
-    if [ "$http_code" -ne 200 ]; then
+
+    http_code=$(wget_status "https://api.github.com/user" "$auth_header")
+    if [ "$http_code" != "200" ]; then
         return 1
     fi
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
-        -H "Authorization: Bearer $token" \
-        "https://api.github.com/repos/$GITHUB_REPO")
-    if [ "$http_code" -eq 200 ]; then
+
+    http_code=$(wget_status "https://api.github.com/repos/$GITHUB_REPO" "$auth_header")
+    if [ "$http_code" = "200" ]; then
         return 0
-    elif [ "$http_code" -eq 404 ] || [ "$http_code" -eq 403 ]; then
+    elif [ "$http_code" = "404" ] || [ "$http_code" = "403" ]; then
         echo -e "\n  ${YELLOW}⚠ Token is valid but cannot access repo '${GITHUB_REPO}' (HTTP $http_code).${NC}"
         echo -e "  ${YELLOW}  Ensure the token has 'repo' or 'contents:read' scope.${NC}"
         return 2
@@ -360,8 +402,6 @@ while [ $attempt -lt $MAX_ATTEMPTS ]; do
     echo -e "  ${YELLOW}Please try again.${NC}"
 done
 
-HEADERS="Authorization: Bearer $GITHUB_TOKEN"
-
 # ============================================================
 # STEP 1 — Collect Manager IP and Agent Name
 # ============================================================
@@ -373,7 +413,6 @@ while [[ -z "$MANAGER_IP" ]]; do
     read -p "  Enter Manager IP: " MANAGER_IP
 done
 
-# Reachability check
 printf "  Checking Manager reachability on port ${WAZUH_AGENT_PORT}..."
 if nc -z -w5 "$MANAGER_IP" "$WAZUH_AGENT_PORT" &>/dev/null; then
     success "Manager is reachable at ${MANAGER_IP}:${WAZUH_AGENT_PORT}."
@@ -409,7 +448,6 @@ while [[ -z "$AGENT_NAME" ]]; do
     read -p "  Enter Agent Name: " AGENT_NAME
 done
 
-# Detect network interface and agent IP
 read -r InterfaceName AgentIP <<< "$(ip -4 -o addr show | grep -v '127.0.0.1' | awk '{print $2, $4}' | cut -d/ -f1 | head -n 1)"
 success "Detected interface: ${InterfaceName} (${AgentIP})"
 
@@ -480,18 +518,16 @@ fi
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # ============================================================
-# STEP 3 — Install prerequisites (curl, wget, nc)
+# STEP 3 — Install prerequisites (wget, nc)
 # ============================================================
 step "Step 3 │ Prerequisites"
 
-echo -e "  ${BOLD}Ensuring required tools are present...${NC}"
-
 if [ "$OS_MAJOR" = "7" ]; then
-    yum install -y curl wget nmap-ncat &>>"$LOG_FILE" &
+    yum install -y wget nmap-ncat &>>"$LOG_FILE" &
 else
-    dnf install -y curl wget nmap-ncat &>>"$LOG_FILE" &
+    dnf install -y wget nmap-ncat &>>"$LOG_FILE" &
 fi
-spinner $! "Installing prerequisites (curl, wget, nc)"
+spinner $! "Installing prerequisites (wget, nc)"
 handle_error $? "Failed to install prerequisites."
 success "Prerequisites ready."
 
@@ -501,19 +537,17 @@ success "Prerequisites ready."
 step "Step 4 │ Agent Package"
 
 if ! $SKIP_PACKAGE; then
-    ROLLBACK_ENABLED=true   # arm rollback
+    ROLLBACK_ENABLED=true
 
-    echo -e "  ${BOLD}Downloading agent package...${NC}"
-    curl -L -o "/tmp/$WAZUH_RPM" "$WAZUH_PKG_URL" &>>"$LOG_FILE" &
-    spinner $! "Downloading"
+    wget_get "/tmp/$WAZUH_RPM" "$WAZUH_PKG_URL" >> "$LOG_FILE" 2>&1 &
+    spinner $! "Downloading agent package"
     handle_error $? "Failed to download CyberSentinel Agent package."
 
-    echo -e "  ${BOLD}Installing agent package...${NC}"
     WAZUH_MANAGER="$MANAGER_IP" \
     WAZUH_AGENT_GROUP="Linux" \
     WAZUH_AGENT_NAME="$AGENT_NAME" \
     rpm -ivh "/tmp/$WAZUH_RPM" &>>"$LOG_FILE" &
-    spinner $! "Installing"
+    spinner $! "Installing agent package"
     handle_error $? "Failed to install CyberSentinel Agent package."
     success "Agent package installed."
 else
@@ -532,55 +566,47 @@ YARA_SRC_DIR="/usr/local/bin/yara-${YARA_VERSION}"
 YARA_RULES_DIR="/tmp/yara/rules"
 
 # 1 — Dependencies
-echo -e "  ${BOLD}Installing YARA build dependencies...${NC}"
 if [ "$OS_MAJOR" = "7" ]; then
     yum install -y make gcc autoconf automake libtool openssl-devel pkgconfig jq &>>"$LOG_FILE" &
 else
     dnf install -y make gcc autoconf automake libtool openssl-devel pkgconfig jq &>>"$LOG_FILE" &
 fi
-spinner $! "Installing build dependencies"
+spinner $! "Installing YARA build dependencies"
 handle_error $? "Failed to install YARA build dependencies."
 
-# 2 — Download source tarball
-echo -e "  ${BOLD}Downloading YARA v${YARA_VERSION} source...${NC}"
-curl -L -o "$YARA_TARBALL" "$YARA_URL" &>>"$LOG_FILE" &
+# 2 — Download
+wget_get "$YARA_TARBALL" "$YARA_URL" >> "$LOG_FILE" 2>&1 &
 spinner $! "Downloading YARA v${YARA_VERSION}"
 handle_error $? "Failed to download YARA source tarball."
 
 # 3 — Extract
-echo -e "  ${BOLD}Extracting YARA source to /usr/local/bin/...${NC}"
 tar -xvzf "$YARA_TARBALL" -C /usr/local/bin/ &>>"$LOG_FILE" \
     && rm -f "$YARA_TARBALL"
 handle_error $? "Failed to extract YARA source."
 
 # 4 — Bootstrap
-echo -e "  ${BOLD}Bootstrapping YARA...${NC}"
 (cd "$YARA_SRC_DIR" && ./bootstrap.sh) &>>"$LOG_FILE" &
-spinner $! "Bootstrapping"
+spinner $! "Bootstrapping YARA"
 handle_error $? "YARA bootstrap failed."
 
 # 5 — Configure
-echo -e "  ${BOLD}Configuring YARA...${NC}"
 (cd "$YARA_SRC_DIR" && ./configure) &>>"$LOG_FILE" &
-spinner $! "Configuring"
+spinner $! "Configuring YARA"
 handle_error $? "YARA configure failed."
 
 # 6 — Compile
-echo -e "  ${BOLD}Compiling YARA (this may take a moment)...${NC}"
 (cd "$YARA_SRC_DIR" && make) &>>"$LOG_FILE" &
-spinner $! "Compiling"
+spinner $! "Compiling YARA"
 handle_error $? "YARA compilation failed."
 
 # 7 — Install
-echo -e "  ${BOLD}Installing YARA...${NC}"
 (cd "$YARA_SRC_DIR" && make install) &>>"$LOG_FILE" &
 spinner $! "Installing YARA"
 handle_error $? "YARA make install failed."
 
-# 8 — Run test suite
-echo -e "  ${BOLD}Running YARA test suite...${NC}"
+# 8 — Test suite
 (cd "$YARA_SRC_DIR" && make check) &>>"$LOG_FILE" &
-spinner $! "Running make check"
+spinner $! "Running YARA test suite"
 if [ $? -ne 0 ]; then
     warn "YARA test suite reported failures — check $LOG_FILE for details."
 else
@@ -599,20 +625,15 @@ else
 fi
 
 # 11 — Download Valhalla community YARA rules
-echo -e "  ${BOLD}Downloading Valhalla community YARA rules...${NC}"
 mkdir -p "$YARA_RULES_DIR"
-curl -s \
-    -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' \
-    -H 'Accept-Language: en-US,en;q=0.5' \
-    --compressed \
-    -H 'Referer: https://valhalla.nextron-systems.com/' \
-    -H 'Content-Type: application/x-www-form-urlencoded' \
-    -H 'DNT: 1' \
-    -H 'Connection: keep-alive' \
-    -H 'Upgrade-Insecure-Requests: 1' \
-    --data 'demo=demo&apikey=1111111111111111111111111111111111111111111111111111111111111111&format=text' \
-    -o "${YARA_RULES_DIR}/yara_rules.yar" \
-    'https://valhalla.nextron-systems.com/api/v1/get' &
+wget -q --tries=3 --timeout=60 --no-check-certificate \
+     --header='Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' \
+     --header='Accept-Language: en-US,en;q=0.5' \
+     --header='Referer: https://valhalla.nextron-systems.com/' \
+     --header='DNT: 1' \
+     --post-data='demo=demo&apikey=1111111111111111111111111111111111111111111111111111111111111111&format=text' \
+     -O "${YARA_RULES_DIR}/yara_rules.yar" \
+     'https://valhalla.nextron-systems.com/api/v1/get' &
 spinner $! "Downloading Valhalla YARA rules"
 handle_error $? "Failed to download Valhalla YARA rules."
 
@@ -628,8 +649,7 @@ fi
 # ============================================================
 step "Step 6 │ Configuration File"
 
-curl -s -H "$HEADERS" -o /var/ossec/etc/ossec.conf \
-    "$BASE_URL/ossec.conf" &
+wget_api /var/ossec/etc/ossec.conf "$BASE_URL/ossec.conf" >> "$LOG_FILE" 2>&1 &
 spinner $! "Downloading ossec.conf"
 handle_error $? "Failed to download ossec.conf from GitHub."
 
@@ -666,8 +686,7 @@ step "Step 8 │ Active Response Scripts"
 mkdir -p "$BIN_DIR"
 
 for file in llm_query.py remove-threat.sh yara.sh; do
-    curl -s -H "$HEADERS" -o "$BIN_DIR/$file" \
-        "$BASE_URL/ACTIVE-RESPONSE/$file" &
+    wget_api "$BIN_DIR/$file" "$BASE_URL/ACTIVE-RESPONSE/$file" >> "$LOG_FILE" 2>&1 &
     spinner $! "Fetching $file"
     handle_error $? "Failed to download $file."
 done
@@ -681,20 +700,15 @@ success "Active response scripts installed and permissions set."
 # ============================================================
 step "Step 9 │ Suricata IDS"
 
-echo -e "  ${BOLD}Installing Suricata via EPEL...${NC}"
-
 if [ "$OS_MAJOR" = "7" ]; then
-    # CentOS 7 — EPEL via yum
     yum install -y epel-release &>>"$LOG_FILE" &
     spinner $! "Adding EPEL repository"
     yum install -y suricata &>>"$LOG_FILE" &
     spinner $! "Installing Suricata"
 else
-    # CentOS 8/9/Stream — EPEL via dnf; also enable PowerTools/CRB for deps
     dnf install -y epel-release &>>"$LOG_FILE" &
     spinner $! "Adding EPEL repository"
 
-    # Enable PowerTools (CentOS 8) or CRB (CentOS 9/Stream)
     if [ "$OS_MAJOR" = "8" ]; then
         dnf config-manager --set-enabled powertools &>>"$LOG_FILE" || \
         dnf config-manager --set-enabled PowerTools &>>"$LOG_FILE" || true
@@ -707,8 +721,9 @@ else
 fi
 handle_error $? "Failed to install Suricata."
 
-# Download Emerging Threats rules
-cd /tmp/ && curl -sLO https://rules.emergingthreats.net/open/suricata-6.0.8/emerging.rules.tar.gz &>>"$LOG_FILE" &
+wget_get /tmp/emerging.rules.tar.gz \
+    "https://rules.emergingthreats.net/open/suricata-6.0.8/emerging.rules.tar.gz" \
+    >> "$LOG_FILE" 2>&1 &
 spinner $! "Downloading Emerging Threats rules"
 
 tar -xzf /tmp/emerging.rules.tar.gz -C /tmp/ &>>"$LOG_FILE"
@@ -717,8 +732,7 @@ mv /tmp/rules/*.rules /etc/suricata/rules/
 chmod 640 /etc/suricata/rules/*.rules
 success "Suricata rules installed."
 
-curl -s -H "$HEADERS" -o /etc/suricata/suricata.yaml \
-    "$BASE_URL/suricata.yaml" &
+wget_api /etc/suricata/suricata.yaml "$BASE_URL/suricata.yaml" >> "$LOG_FILE" 2>&1 &
 spinner $! "Downloading suricata.yaml"
 handle_error $? "Failed to download suricata.yaml."
 
@@ -735,7 +749,6 @@ success "Suricata configured and running."
 # ============================================================
 step "Step 10 │ SELinux & Firewall"
 
-# SELinux — set to permissive if enforcing (Wazuh agent known issue on CentOS 7)
 if command -v getenforce &>/dev/null; then
     SELINUX_STATUS=$(getenforce 2>/dev/null || echo "Unknown")
     if [ "$SELINUX_STATUS" = "Enforcing" ]; then
@@ -748,7 +761,6 @@ if command -v getenforce &>/dev/null; then
     fi
 fi
 
-# Firewall — open Wazuh agent port if firewalld is active
 if systemctl is-active --quiet firewalld 2>/dev/null; then
     firewall-cmd --permanent --add-port="${WAZUH_AGENT_PORT}/tcp" &>>"$LOG_FILE"
     firewall-cmd --permanent --add-port="${WAZUH_AGENT_PORT}/udp" &>>"$LOG_FILE"
