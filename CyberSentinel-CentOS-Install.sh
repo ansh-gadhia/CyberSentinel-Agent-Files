@@ -470,13 +470,14 @@ else
 
     (cd "$YARA_SRC_DIR" && make check) &>>"$LOG_FILE" &
     spinner $! "Running YARA test suite"
-    [ $? -ne 0 ] && warn "YARA tests had failures — check $LOG_FILE." || success "YARA test suite passed."
+    [ $? -ne 0 ] && warn "YARA tests had failures — continuing anyway." || success "YARA test suite passed."
 
     ldconfig &>>"$LOG_FILE"
+    hash -r 2>/dev/null || true
 
-    YARA_VER=$(yara --version 2>/dev/null || echo "not found")
+    YARA_VER=$(yara --version 2>/dev/null || /usr/local/bin/yara --version 2>/dev/null || echo "not found")
     [ "$YARA_VER" != "not found" ] \
-        && success "YARA ${YARA_VER} installed → $(command -v yara)" \
+        && success "YARA ${YARA_VER} installed → $(command -v yara 2>/dev/null || echo /usr/local/bin/yara)" \
         || warn "YARA binary not found after install."
 
     mkdir -p "$YARA_RULES_DIR"
@@ -561,47 +562,68 @@ success "Active response scripts installed."
 # ============================================================
 step "Step 9 │ Suricata IDS"
 
-if [ "$OS_MAJOR" = "7" ]; then
-    $PKG_MANAGER install -y epel-release &>>"$LOG_FILE" &
-    spinner $! "Adding EPEL repository"
-    $PKG_MANAGER install -y suricata &>>"$LOG_FILE" &
-    spinner $! "Installing Suricata"
-else
-    $PKG_MANAGER install -y epel-release &>>"$LOG_FILE" &
-    spinner $! "Adding EPEL repository"
-    if [ "$OS_MAJOR" = "8" ]; then
+install_suricata() {
+    if [ "$OS_MAJOR" = "7" ]; then
+        $PKG_MANAGER install -y epel-release &>>"$LOG_FILE"
+        spinner $! "Adding EPEL repository"
+        $PKG_MANAGER install -y suricata &>>"$LOG_FILE"
+    elif [ "$OS_MAJOR" = "8" ]; then
+        $PKG_MANAGER install -y epel-release &>>"$LOG_FILE" &
+        spinner $! "Adding EPEL repository"
         $PKG_MANAGER config-manager --set-enabled powertools &>>"$LOG_FILE" || \
         $PKG_MANAGER config-manager --set-enabled PowerTools &>>"$LOG_FILE" || true
-    else
+        $PKG_MANAGER install -y suricata &>>"$LOG_FILE"
+    elif [ "$OS_MAJOR" = "9" ]; then
+        $PKG_MANAGER install -y epel-release &>>"$LOG_FILE" &
+        spinner $! "Adding EPEL repository"
         $PKG_MANAGER config-manager --set-enabled crb &>>"$LOG_FILE" || true
+        $PKG_MANAGER install -y suricata &>>"$LOG_FILE"
+    else
+        # CentOS 10+ — Suricata not yet in EPEL; install via OISF copr
+        warn "CentOS ${OS_MAJOR}: installing Suricata via OISF copr repo..."
+        $PKG_MANAGER install -y dnf-plugins-core &>>"$LOG_FILE"
+        $PKG_MANAGER copr enable @oisf/suricata-stable -y &>>"$LOG_FILE" || true
+        $PKG_MANAGER install -y suricata &>>"$LOG_FILE"
     fi
-    $PKG_MANAGER install -y suricata &>>"$LOG_FILE" &
-    spinner $! "Installing Suricata"
+}
+
+install_suricata &>>"$LOG_FILE" &
+spinner $! "Installing Suricata"
+SURICATA_EXIT=$?
+
+if [ $SURICATA_EXIT -ne 0 ] || ! command -v suricata &>/dev/null; then
+    warn "Suricata could not be installed on CentOS ${OS_MAJOR} — skipping Suricata setup."
+    SURICATA_SKIPPED=true
+else
+    SURICATA_SKIPPED=false
 fi
-handle_error $? "Failed to install Suricata."
 
-wget_get /tmp/emerging.rules.tar.gz \
-    "https://rules.emergingthreats.net/open/suricata-6.0.8/emerging.rules.tar.gz" \
-    >> "$LOG_FILE" 2>&1 &
-spinner $! "Downloading Emerging Threats rules"
+if ! $SURICATA_SKIPPED; then
+    wget_get /tmp/emerging.rules.tar.gz \
+        "https://rules.emergingthreats.net/open/suricata-6.0.8/emerging.rules.tar.gz" \
+        >> "$LOG_FILE" 2>&1 &
+    spinner $! "Downloading Emerging Threats rules"
 
-tar -xzf /tmp/emerging.rules.tar.gz -C /tmp/ &>>"$LOG_FILE"
-mkdir -p /etc/suricata/rules
-mv /tmp/rules/*.rules /etc/suricata/rules/
-chmod 640 /etc/suricata/rules/*.rules
-success "Suricata rules installed."
+    tar -xzf /tmp/emerging.rules.tar.gz -C /tmp/ &>>"$LOG_FILE"
+    mkdir -p /etc/suricata/rules
+    mv /tmp/rules/*.rules /etc/suricata/rules/
+    chmod 640 /etc/suricata/rules/*.rules
+    success "Suricata rules installed."
 
-wget_api /etc/suricata/suricata.yaml "$BASE_URL/suricata.yaml" >> "$LOG_FILE" 2>&1 &
-spinner $! "Downloading suricata.yaml"
-handle_error $? "Failed to download suricata.yaml."
+    wget_api /etc/suricata/suricata.yaml "$BASE_URL/suricata.yaml" >> "$LOG_FILE" 2>&1 &
+    spinner $! "Downloading suricata.yaml"
+    handle_error $? "Failed to download suricata.yaml."
 
-sed -i "s/AgentIP/$AgentIP/g"             /etc/suricata/suricata.yaml
-sed -i "s/InterfaceName/$InterfaceName/g" /etc/suricata/suricata.yaml
+    sed -i "s/AgentIP/$AgentIP/g"             /etc/suricata/suricata.yaml
+    sed -i "s/InterfaceName/$InterfaceName/g" /etc/suricata/suricata.yaml
 
-systemctl enable suricata &>>"$LOG_FILE"
-systemctl restart suricata &>>"$LOG_FILE" &
-spinner $! "Starting Suricata"
-success "Suricata configured and running."
+    systemctl enable suricata &>>"$LOG_FILE"
+    systemctl restart suricata &>>"$LOG_FILE" &
+    spinner $! "Starting Suricata"
+    success "Suricata configured and running."
+else
+    warn "Suricata setup skipped — install it manually if needed."
+fi
 
 # ============================================================
 # STEP 10 — SELinux & Firewall
@@ -668,8 +690,13 @@ sleep 2
 CS_STATUS=$(systemctl is-active cybersentinel-agent 2>/dev/null)
 SURICATA_STATUS=$(systemctl is-active suricata 2>/dev/null)
 
-[ "$CS_STATUS"       = "active" ] && success "cybersentinel-agent  → running"  || warn "cybersentinel-agent  → ${CS_STATUS}"
-[ "$SURICATA_STATUS" = "active" ] && success "suricata             → running"  || warn "suricata             → ${SURICATA_STATUS}"
+[ "$CS_STATUS"       = "active" ] && success "cybersentinel-agent  → running" || warn "cybersentinel-agent  → ${CS_STATUS}"
+
+if $SURICATA_SKIPPED; then
+    warn "suricata             → skipped (not available for CentOS ${OS_MAJOR})"
+else
+    [ "$SURICATA_STATUS" = "active" ] && success "suricata             → running" || warn "suricata             → ${SURICATA_STATUS}"
+fi
 
 if [ "$OS_MAJOR" = "7" ]; then
     warn "yara              → skipped (CentOS 7)"
