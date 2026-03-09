@@ -262,39 +262,39 @@ install_python3_centos7() {
         fi
     }
 
+    # Download one RPM and verify it is a real RPM (magic bytes check — no 'file' cmd needed)
     wget_rpm() {
         local base="$1"
         local pkg="$2"
         local dest="${RPM_DIR}/${pkg}"
         wget -q --tries=3 --timeout=60 --no-check-certificate \
-             -O "$dest" "${base}/${pkg}"
-        # Verify it's actually an RPM (not an HTML 404 page)
-        if ! file "$dest" 2>/dev/null | grep -q "RPM"; then
-            echo "WARN: $pkg downloaded but is not a valid RPM — removing" >> "$LOG_FILE"
+             -O "$dest" "${base}/${pkg}" 2>>"$LOG_FILE"
+        local rc=$?
+        if [ $rc -ne 0 ]; then
+            echo "WARN: wget failed for $pkg (exit $rc)" >> "$LOG_FILE"
+            rm -f "$dest"
+            return 1
+        fi
+        # RPM magic: first 4 bytes are 0xed 0xab 0xee 0xdb
+        local magic
+        magic=$(od -A n -t x1 -N 4 "$dest" 2>/dev/null | tr -d ' \n')
+        if [ "$magic" != "edabeedb" ]; then
+            echo "WARN: $pkg is not a valid RPM (magic=$magic) — removing" >> "$LOG_FILE"
             rm -f "$dest"
             return 1
         fi
         return 0
     }
 
-    # ----------------------------------------------------------------
-    # 1 — Download build dependency RPMs via wget (bypass yum/curl)
-    #     Sources:
-    #       OS path    = base packages (stable versions, no el7_9 suffix)
-    #       Updates path = security-updated packages (el7_9 suffix)
-    # ----------------------------------------------------------------
     mkdir -p "$RPM_DIR"
-
     printf "  ${CYAN}%-52s${NC}" "Downloading build dependency RPMs..."
     local failed=0
 
+    # Exact filenames verified from vault.centos.org listing
     # --- from OS repo ---
     for pkg in \
         "cpp-4.8.5-44.el7.x86_64.rpm" \
         "gcc-4.8.5-44.el7.x86_64.rpm" \
-        "glibc-devel-2.17-317.el7.x86_64.rpm" \
-        "glibc-headers-2.17-317.el7.x86_64.rpm" \
-        "kernel-headers-3.10.0-1160.el7.x86_64.rpm" \
         "libmpc-1.0.1-3.el7.x86_64.rpm" \
         "mpfr-3.1.1-4.el7.x86_64.rpm" \
         "make-3.82-24.el7.x86_64.rpm" \
@@ -314,62 +314,61 @@ install_python3_centos7() {
         "sqlite-devel-3.7.17-8.el7_7.1.x86_64.rpm" \
         "sqlite-3.7.17-8.el7_7.1.x86_64.rpm"
     do
-        wget_rpm "$VAULT_OS" "$pkg" >> "$LOG_FILE" 2>&1 \
-            || { warn_msg="WARN: failed $pkg (os)"; echo "$warn_msg" >> "$LOG_FILE"; failed=$((failed+1)); }
+        wget_rpm "$VAULT_OS" "$pkg" || failed=$((failed+1))
     done
 
-    # --- from Updates repo (el7_9 security versions) ---
+    # --- from Updates repo (exact versions confirmed from vault listing) ---
     for pkg in \
+        "glibc-devel-2.17-326.el7_9.x86_64.rpm" \
+        "glibc-headers-2.17-326.el7_9.x86_64.rpm" \
+        "kernel-headers-3.10.0-1160.119.1.el7.x86_64.rpm" \
         "openssl-1.0.2k-26.el7_9.x86_64.rpm" \
         "openssl-libs-1.0.2k-26.el7_9.x86_64.rpm" \
         "openssl-devel-1.0.2k-26.el7_9.x86_64.rpm" \
         "zlib-devel-1.2.7-21.el7_9.x86_64.rpm" \
+        "zlib-1.2.7-21.el7_9.x86_64.rpm" \
         "xz-devel-5.2.2-2.el7_9.x86_64.rpm" \
         "xz-libs-5.2.2-2.el7_9.x86_64.rpm" \
+        "xz-5.2.2-2.el7_9.x86_64.rpm" \
         "krb5-libs-1.15.1-55.el7_9.x86_64.rpm" \
-        "krb5-devel-1.15.1-55.el7_9.x86_64.rpm" \
-        "libkadm5-1.15.1-55.el7_9.x86_64.rpm"
+        "krb5-devel-1.15.1-55.el7_9.x86_64.rpm"
     do
-        wget_rpm "$VAULT_UPD" "$pkg" >> "$LOG_FILE" 2>&1 \
-            || { echo "WARN: failed $pkg (updates)" >> "$LOG_FILE"; failed=$((failed+1)); }
+        wget_rpm "$VAULT_UPD" "$pkg" || failed=$((failed+1))
     done
+
+    local rpm_count
+    rpm_count=$(ls "${RPM_DIR}"/*.rpm 2>/dev/null | wc -l)
 
     if [ $failed -eq 0 ]; then
         printf " [${GREEN}✔${NC}]\n"
     else
-        printf " [${YELLOW}⚠ $failed skipped${NC}]\n"
-        warn "$failed RPMs could not be downloaded — continuing, may already be installed."
+        printf " [${YELLOW}⚠ $failed failed${NC}]\n"
+        warn "$failed RPMs failed to download — may already be installed on system."
     fi
 
-    # Count valid RPMs actually downloaded
-    local rpm_count
-    rpm_count=$(ls "${RPM_DIR}"/*.rpm 2>/dev/null | wc -l)
     if [ "$rpm_count" -eq 0 ]; then
-        error "No valid RPMs downloaded — cannot continue."
+        error "No valid RPMs downloaded. Cannot continue."
         exit 1
     fi
 
-    # Install all valid RPMs — nosignature skips GPG check, nodeps skips dep resolution
-    py_step "Installing $rpm_count build dependency RPMs..." \
+    # Install all valid RPMs — nosignature skips GPG, nodeps skips resolver
+    py_step "Installing $rpm_count dependency RPMs..." \
         rpm -Uvh --nosignature --nodeps --replacepkgs ${RPM_DIR}/*.rpm
 
     # ----------------------------------------------------------------
-    # 2 — Download Python source from python.org via wget
+    # Download + compile Python 3.11.9 from python.org
     # ----------------------------------------------------------------
     py_step "Downloading Python ${PYTHON_VER} from python.org..." \
         wget -q --tries=3 --timeout=300 --no-check-certificate \
              -O "/tmp/Python-${PYTHON_VER}.tgz" "$PYTHON_SRC_URL"
 
-    # 3 — Extract
     mkdir -p /usr/local/src
     py_step "Extracting source..." \
         tar -xzf "/tmp/Python-${PYTHON_VER}.tgz" -C /usr/local/src/
 
-    # 4 — Configure
     py_step "Configuring Python ${PYTHON_VER}..." \
         bash -c "cd '$PYTHON_SRC_DIR' && ./configure --enable-optimizations --with-ensurepip=install"
 
-    # 5 — Compile (backgrounded so spinner runs)
     printf "  ${CYAN}%-52s${NC}" "Compiling Python ${PYTHON_VER} (may take minutes)..."
     (cd "$PYTHON_SRC_DIR" && make -j"$(nproc)") >> "$LOG_FILE" 2>&1 &
     spinner $!
@@ -380,15 +379,12 @@ install_python3_centos7() {
         exit $rc
     fi
 
-    # 6 — Install (altinstall keeps system python2 intact)
     py_step "Installing Python ${PYTHON_VER} (altinstall)..." \
         bash -c "cd '$PYTHON_SRC_DIR' && make altinstall"
 
-    # 7 — Symlinks
     [ ! -f /usr/bin/python3 ] && ln -sf /usr/local/bin/python3.11 /usr/bin/python3
     [ ! -f /usr/bin/pip3    ] && ln -sf /usr/local/bin/pip3.11    /usr/bin/pip3 2>/dev/null || true
 
-    # 8 — Cleanup
     rm -f "/tmp/Python-${PYTHON_VER}.tgz"
     rm -rf "$RPM_DIR"
 }
