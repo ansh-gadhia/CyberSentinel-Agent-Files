@@ -183,6 +183,43 @@ BASE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/AGENTS/${AGENT_P
 success "Base URL: ${BASE_URL}"
 
 # ============================================================
+# CENTOS 7 — Fix EOL vault repos (must run before any yum call)
+# ============================================================
+fix_centos7_repos() {
+    local REPO_DIR="/etc/yum.repos.d"
+
+    printf "  ${CYAN}%-52s${NC}" "Redirecting repos to vault.centos.org..."
+
+    # For every CentOS-*.repo file:
+    #   1. Disable mirrorlist (it points at dead mirrors)
+    #   2. Set baseurl to the HTTPS vault URL
+    for repo_file in "$REPO_DIR"/CentOS-*.repo; do
+        [ -f "$repo_file" ] || continue
+        sed -i 's/^mirrorlist=/#mirrorlist=/g' "$repo_file"
+        sed -i 's|^#\?baseurl=http://mirror\.centos\.org/centos/\$releasever|baseurl=https://vault.centos.org/centos/\$releasever|g' "$repo_file"
+        sed -i 's|^baseurl=http://vault\.centos\.org|baseurl=https://vault.centos.org|g' "$repo_file"
+    done >> "$LOG_FILE" 2>&1
+
+    # Clear stale cache
+    yum clean all >> "$LOG_FILE" 2>&1
+    local rc=$?
+
+    if [ $rc -eq 0 ]; then
+        printf " [${GREEN}✔${NC}]\n"
+    else
+        printf " [${RED}✘${NC}]\n"
+        error "Failed to clean yum cache after repo fix. Check $LOG_FILE."
+        exit $rc
+    fi
+}
+
+if [ "$OS_MAJOR" = "7" ]; then
+    step "CentOS 7 │ Fixing EOL Repositories"
+    fix_centos7_repos
+    success "YUM repos redirected to vault.centos.org."
+fi
+
+# ============================================================
 # PYTHON 3 — CentOS 7 only (compile from source via wget)
 # ============================================================
 install_python3_centos7() {
