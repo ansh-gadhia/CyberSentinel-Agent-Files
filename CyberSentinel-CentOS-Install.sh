@@ -188,19 +188,35 @@ success "Base URL: ${BASE_URL}"
 fix_centos7_repos() {
     local REPO_DIR="/etc/yum.repos.d"
 
-    printf "  ${CYAN}%-52s${NC}" "Redirecting repos to vault.centos.org..."
+    printf "  ${CYAN}%-52s${NC}" "Redirecting repos to vault.centos.org (HTTPS)..."
 
-    # For every CentOS-*.repo file:
-    #   1. Disable mirrorlist (it points at dead mirrors)
-    #   2. Set baseurl to the HTTPS vault URL
+    # Rewrite ALL repo files — handles CentOS-Vault.repo, CentOS-Base.repo, or any variant
     for repo_file in "$REPO_DIR"/CentOS-*.repo; do
         [ -f "$repo_file" ] || continue
+        # 1. Kill mirrorlist lines
         sed -i 's/^mirrorlist=/#mirrorlist=/g' "$repo_file"
-        sed -i 's|^#\?baseurl=http://mirror\.centos\.org/centos/\$releasever|baseurl=https://vault.centos.org/centos/\$releasever|g' "$repo_file"
+        # 2. http://vault.centos.org → https://vault.centos.org  (exact match on your system)
         sed -i 's|^baseurl=http://vault\.centos\.org|baseurl=https://vault.centos.org|g' "$repo_file"
-    done >> "$LOG_FILE" 2>&1
+        # 3. http://mirror.centos.org → https://vault.centos.org  (fallback for other variants)
+        sed -i 's|^baseurl=http://mirror\.centos\.org/centos|baseurl=https://vault.centos.org/centos|g' "$repo_file"
+        # 4. Uncomment commented baseurls and rewrite them
+        sed -i 's|^#baseurl=http://vault\.centos\.org|baseurl=https://vault.centos.org|g' "$repo_file"
+        sed -i 's|^#baseurl=http://mirror\.centos\.org/centos|baseurl=https://vault.centos.org/centos|g' "$repo_file"
+    done
 
-    # Clear stale cache
+    # Show what the baseurls look like now (debug aid logged only)
+    echo "=== Repo baseurls after fix ===" >> "$LOG_FILE"
+    grep -r "^baseurl=" "$REPO_DIR"/CentOS-*.repo >> "$LOG_FILE" 2>&1 || true
+
+    # Abort if any http:// baseurl still remains
+    if grep -r "^baseurl=http://" "$REPO_DIR"/CentOS-*.repo > /dev/null 2>&1; then
+        printf " [${RED}✘${NC}]\n"
+        error "Repo fix failed — http:// baseurls still present:"
+        grep -r "^baseurl=http://" "$REPO_DIR"/CentOS-*.repo | sed 's/^/    /' >&2
+        exit 1
+    fi
+
+    # Clear stale yum metadata
     yum clean all >> "$LOG_FILE" 2>&1
     local rc=$?
 
