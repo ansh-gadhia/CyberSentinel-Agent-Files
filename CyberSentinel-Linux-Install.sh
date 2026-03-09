@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================
-# CyberSentinel Installer Script for CentOS / Oracle Linux (8 / 9 / 10+)
+# CyberSentinel Installer Script for CentOS (8 / 9 / 10+)
 # ============================================================
 
 LOG_DIR="/opt/cybersentinel"
@@ -29,33 +29,24 @@ NC='\033[0m'
 # wget helpers
 # ============================================================
 wget_get() {
-    local out="$1"
-    local url="$2"
-    wget -q --tries=3 --timeout=60 --no-check-certificate -O "$out" "$url"
+    wget -q --tries=3 --timeout=60 --no-check-certificate -O "$1" "$2"
 }
 
 wget_api() {
-    local out="$1"
-    local url="$2"
     wget -q --tries=3 --timeout=60 --no-check-certificate \
-         --header="Authorization: Bearer ${GITHUB_TOKEN}" \
-         -O "$out" "$url"
+         --header="Authorization: Bearer ${GITHUB_TOKEN}" -O "$1" "$2"
 }
 
 wget_status() {
-    local url="$1"
-    local header="${2:-}"
-    local tmp code
+    local url="$1" header="${2:-}" tmp code
     tmp=$(mktemp)
     if [ -n "$header" ]; then
         code=$(wget -q --tries=1 --timeout=15 --no-check-certificate \
-                    --server-response --header="$header" \
-                    -O "$tmp" "$url" 2>&1 \
+                    --server-response --header="$header" -O "$tmp" "$url" 2>&1 \
                | awk '/^  HTTP/{code=$2} END{print code+0}')
     else
         code=$(wget -q --tries=1 --timeout=15 --no-check-certificate \
-                    --server-response \
-                    -O "$tmp" "$url" 2>&1 \
+                    --server-response -O "$tmp" "$url" 2>&1 \
                | awk '/^  HTTP/{code=$2} END{print code+0}')
     fi
     rm -f "$tmp"
@@ -78,59 +69,37 @@ print_banner() {
 }
 
 spinner() {
-    local pid=$1
-    local msg="${2:-Working}"
-    local delay=0.1
-    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    local i=0
-    local len=${#spinstr}
+    local pid=$1 msg="${2:-Working}" delay=0.1
+    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0 len=10
     printf "  ${CYAN}${msg}${NC} "
     while kill -0 "$pid" 2>/dev/null; do
-        local char="${spinstr:$((i % len)):1}"
-        printf "\r  ${CYAN}${msg}${NC} [${YELLOW}${char}${NC}]"
-        i=$((i + 1))
-        sleep $delay
+        printf "\r  ${CYAN}${msg}${NC} [${YELLOW}${spinstr:$((i%len)):1}${NC}]"
+        i=$((i+1)); sleep $delay
     done
-    wait "$pid"
-    local exit_code=$?
-    if [ $exit_code -eq 0 ]; then
-        printf "\r  ${CYAN}${msg}${NC} [${GREEN}✔${NC}]\n"
-    else
-        printf "\r  ${CYAN}${msg}${NC} [${RED}✘${NC}]\n"
-    fi
+    wait "$pid"; local exit_code=$?
+    [ $exit_code -eq 0 ] \
+        && printf "\r  ${CYAN}${msg}${NC} [${GREEN}✔${NC}]\n" \
+        || printf "\r  ${CYAN}${msg}${NC} [${RED}✘${NC}]\n"
     return $exit_code
 }
 
-step() {
-    echo -e "\n${BOLD}${CYAN}══════════════════════════════════════════${NC}"
-    echo -e "  ${BOLD}${1}${NC}"
-    echo -e "${CYAN}══════════════════════════════════════════${NC}"
-}
-
+step()    { echo -e "\n${BOLD}${CYAN}══════════════════════════════════════════${NC}\n  ${BOLD}${1}${NC}\n${CYAN}══════════════════════════════════════════${NC}"; }
 success() { echo -e "  ${GREEN}✔ ${1}${NC}"; }
 warn()    { echo -e "  ${YELLOW}⚠ ${1}${NC}"; }
 error()   { echo -e "  ${RED}✘ ${1}${NC}" >&2; }
 
 handle_error() {
-    local exit_code=$1
-    local msg="${2//wazuh/cybersentinel}"
-    if [ "$exit_code" -ne 0 ]; then
-        error "$msg"
-        exit "$exit_code"
-    fi
+    local exit_code=$1 msg="${2//wazuh/cybersentinel}"
+    [ "$exit_code" -ne 0 ] && { error "$msg"; exit "$exit_code"; }
 }
 
 # ============================================================
 # Privilege check
 # ============================================================
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}Please run as root (sudo).${NC}"
-    exit 1
-fi
+[ "$EUID" -ne 0 ] && { echo -e "${RED}Please run as root (sudo).${NC}"; exit 1; }
 
 mkdir -p "$LOG_DIR"
 touch "$LOG_FILE"
-
 print_banner
 
 # ============================================================
@@ -139,34 +108,23 @@ print_banner
 step "Step 0 │ GitHub Token Validation"
 
 read_masked() {
-    local __var="$1"
-    local __prompt="$2"
-    local __input="" __char=""
+    local __var="$1" __prompt="$2" __input="" __char=""
     printf "%s" "$__prompt"
     stty -echo -icanon min 1 time 0
     while IFS= read -r -d '' -n1 __char 2>/dev/null; do
-        if [[ "$__char" == $'\n' || "$__char" == $'\r' || -z "$__char" ]]; then
-            break
-        fi
+        [[ "$__char" == $'\n' || "$__char" == $'\r' || -z "$__char" ]] && break
         if [[ "$__char" == $'\x7f' || "$__char" == $'\x08' ]]; then
-            if [ ${#__input} -gt 0 ]; then
-                __input="${__input%?}"
-                printf '\b \b'
-            fi
+            [ ${#__input} -gt 0 ] && { __input="${__input%?}"; printf '\b \b'; }
         else
-            __input+="$__char"
-            printf '*'
+            __input+="$__char"; printf '*'
         fi
     done
-    stty sane
-    echo
+    stty sane; echo
     printf -v "$__var" '%s' "$__input"
 }
 
 validate_github_token() {
-    local token="$1"
-    local auth_header="Authorization: Bearer ${token}"
-    local http_code
+    local token="$1" auth_header="Authorization: Bearer ${1}" http_code
     http_code=$(wget_status "https://api.github.com/user" "$auth_header")
     [ "$http_code" != "200" ] && return 1
     http_code=$(wget_status "https://api.github.com/repos/$GITHUB_REPO" "$auth_header")
@@ -186,74 +144,49 @@ attempt=0
 GITHUB_TOKEN=""
 
 while [ $attempt -lt $MAX_ATTEMPTS ]; do
-    attempt=$((attempt + 1))
+    attempt=$((attempt+1))
     read_masked GITHUB_TOKEN "  Enter GitHub Personal Access Token: "
-    if [ ${#GITHUB_TOKEN} -gt 8 ]; then
-        masked="${GITHUB_TOKEN:0:4}$(printf '%0.s*' $(seq 1 $((${#GITHUB_TOKEN} - 8))))${GITHUB_TOKEN: -4}"
-    else
-        masked="****"
-    fi
+    [ ${#GITHUB_TOKEN} -gt 8 ] \
+        && masked="${GITHUB_TOKEN:0:4}$(printf '%0.s*' $(seq 1 $((${#GITHUB_TOKEN}-8))))${GITHUB_TOKEN: -4}" \
+        || masked="****"
     echo -e "  Token entered: ${YELLOW}${masked}${NC}"
     printf "  Validating token..."
-    validate_github_token "$GITHUB_TOKEN"
-    val_result=$?
+    validate_github_token "$GITHUB_TOKEN"; val_result=$?
     if [ $val_result -eq 0 ]; then
-        success "Token is valid and has repository access."
-        break
+        success "Token is valid and has repository access."; break
     elif [ $val_result -eq 2 ]; then
         error "Token lacks repo scope (attempt $attempt/$MAX_ATTEMPTS)."
     else
         error "Invalid or expired token (attempt $attempt/$MAX_ATTEMPTS)."
     fi
-    if [ $attempt -eq $MAX_ATTEMPTS ]; then
-        error "Too many failed attempts. Exiting."
-        exit 1
-    fi
+    [ $attempt -eq $MAX_ATTEMPTS ] && { error "Too many failed attempts. Exiting."; exit 1; }
     echo -e "  ${YELLOW}Please try again.${NC}"
 done
 
 # ============================================================
 # OS DETECTION
 # ============================================================
-step "OS Detection │ Identifying OS and Version"
+step "OS Detection │ Identifying CentOS Version"
 
-IS_CENTOS=false
-IS_ORACLE=false
-
-if [ -f /etc/centos-release ] || grep -qi "centos" /etc/os-release 2>/dev/null; then
-    IS_CENTOS=true
-    OS_NAME="CentOS"
-elif grep -qi "oracle" /etc/os-release 2>/dev/null || [ -f /etc/oracle-release ]; then
-    IS_ORACLE=true
-    OS_NAME="Oracle Linux"
-else
-    error "This installer only supports CentOS or Oracle Linux."
+if [ ! -f /etc/centos-release ] && ! grep -qi "centos" /etc/os-release 2>/dev/null; then
+    error "This installer only supports CentOS."
     exit 1
 fi
 
-OS_VERSION_RAW=$(rpm -q --queryformat '%{VERSION}' centos-release 2>/dev/null \
-    || rpm -q --queryformat '%{VERSION}' oraclelinux-release 2>/dev/null \
+OS_MAJOR=$(rpm -q --queryformat '%{VERSION}' centos-release 2>/dev/null \
     || grep -oP '(?<=VERSION_ID=")[0-9]+' /etc/os-release \
-    || grep -oP '[0-9]+' /etc/os-release | head -1)
-OS_MAJOR=$(echo "$OS_VERSION_RAW" | grep -oP '^[0-9]+')
+    || grep -oP '[0-9]+' /etc/centos-release | head -1)
+OS_MAJOR=$(echo "$OS_MAJOR" | grep -oP '^[0-9]+')
 
-if [ -z "$OS_MAJOR" ]; then
-    error "Could not determine OS major version. Exiting."
-    exit 1
-fi
+[ -z "$OS_MAJOR" ] && { error "Could not determine CentOS version."; exit 1; }
+[ "$OS_MAJOR" -lt 8 ] && { error "CentOS ${OS_MAJOR} is not supported. Requires CentOS 8+."; exit 1; }
 
-if [ "$OS_MAJOR" -lt 8 ]; then
-    error "${OS_NAME} ${OS_MAJOR} is not supported. This installer requires version 8 or higher."
-    exit 1
-fi
-
-success "Detected: ${OS_NAME} ${OS_MAJOR}"
-success "Agent path: ${AGENT_PATH}"
+success "Detected: CentOS ${OS_MAJOR}"
 BASE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/AGENTS/${AGENT_PATH}"
 success "Base URL: ${BASE_URL}"
 
 # ============================================================
-# STEP 1 — Manager IP + Agent Name
+# STEP 1 — Configuration
 # ============================================================
 step "Step 1 │ Configuration"
 
@@ -345,7 +278,6 @@ else
     SKIP_PACKAGE=false
 fi
 
-# Redirect output to log + console
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # ============================================================
@@ -459,14 +391,13 @@ success "ossec.conf applied."
 step "Step 7 │ Systemd Service"
 
 systemctl stop wazuh-agent &>>"$LOG_FILE"
-
 SERVICE_SRC="/lib/systemd/system/wazuh-agent.service"
 SERVICE_DST="/etc/systemd/system/cybersentinel-agent.service"
 
 if [ -f "$SERVICE_SRC" ]; then
     cp "$SERVICE_SRC" "$SERVICE_DST"
     sed -i 's/wazuh-agent/cybersentinel-agent/g' "$SERVICE_DST"
-    sed -i 's/Wazuh/CyberSentinel/g'             "$SERVICE_DST"
+    sed -i 's/Wazuh/CyberSentinel/g' "$SERVICE_DST"
     systemctl daemon-reexec &>>"$LOG_FILE"
     systemctl daemon-reload &>>"$LOG_FILE"
     success "cybersentinel-agent.service created."
@@ -480,13 +411,11 @@ fi
 step "Step 8 │ Active Response Scripts"
 
 mkdir -p "$BIN_DIR"
-
 for file in llm_query.py remove-threat.sh yara.sh; do
     wget_api "$BIN_DIR/$file" "$BASE_URL/ACTIVE-RESPONSE/$file" >> "$LOG_FILE" 2>&1 &
     spinner $! "Fetching $file"
     handle_error $? "Failed to download $file."
 done
-
 chmod +x "$BIN_DIR"/*
 chown root:wazuh "$BIN_DIR"/*
 success "Active response scripts installed."
@@ -503,11 +432,11 @@ install_suricata() {
 }
 
 install_suricata &
-spinner $! "Installing Suricata (${OS_NAME} ${OS_MAJOR})"
+spinner $! "Installing Suricata"
 SURICATA_EXIT=$?
 
 if [ $SURICATA_EXIT -ne 0 ] || ! command -v suricata &>/dev/null; then
-    warn "Suricata could not be installed on ${OS_NAME} ${OS_MAJOR} — skipping Suricata setup."
+    warn "Suricata could not be installed — skipping Suricata setup."
     SURICATA_SKIPPED=true
 else
     SURICATA_SKIPPED=false
@@ -535,7 +464,7 @@ if ! $SURICATA_SKIPPED; then
     spinner $! "Downloading suricata.yaml"
     handle_error $? "Failed to download suricata.yaml."
 
-    sed -i "s/AgentIP/$AgentIP/g"             /etc/suricata/suricata.yaml
+    sed -i "s/AgentIP/$AgentIP/g" /etc/suricata/suricata.yaml
     sed -i "s/InterfaceName/$InterfaceName/g" /etc/suricata/suricata.yaml
 
     systemctl enable suricata &>>"$LOG_FILE"
@@ -544,7 +473,7 @@ if ! $SURICATA_SKIPPED; then
         spinner $! "Starting Suricata"
         success "Suricata configured and running."
     else
-        warn "Suricata config test failed — service not started. Check $LOG_FILE for details."
+        warn "Suricata config test failed — check $LOG_FILE for details."
     fi
 else
     warn "Suricata setup skipped — install it manually if needed."
@@ -566,7 +495,6 @@ handle_error $? "Failed to start CyberSentinel Agent."
 step "Step 11 │ Post-Install Verification"
 
 sleep 2
-
 CS_STATUS=$(systemctl is-active cybersentinel-agent 2>/dev/null)
 SURICATA_STATUS=$(systemctl is-active suricata 2>/dev/null)
 
@@ -575,7 +503,7 @@ SURICATA_STATUS=$(systemctl is-active suricata 2>/dev/null)
     || warn    "cybersentinel-agent  → ${CS_STATUS}"
 
 if $SURICATA_SKIPPED; then
-    warn "suricata             → skipped (not available for ${OS_NAME} ${OS_MAJOR})"
+    warn "suricata             → skipped"
 elif command -v suricata &>/dev/null || [ -f /usr/sbin/suricata ]; then
     [ "$SURICATA_STATUS" = "active" ] \
         && success "suricata             → running" \
@@ -596,7 +524,7 @@ echo ""
 echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}${BOLD}║      CyberSentinel Installation Summary      ║${NC}"
 echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════╝${NC}"
-echo -e "  OS           : ${BOLD}${OS_NAME} ${OS_MAJOR}${NC}"
+echo -e "  OS           : ${BOLD}CentOS ${OS_MAJOR}${NC}"
 echo -e "  Agent Path   : ${BOLD}${AGENT_PATH}${NC}"
 echo -e "  Manager IP   : ${BOLD}${MANAGER_IP}${NC}"
 echo -e "  Agent Name   : ${BOLD}${AGENT_NAME}${NC}"
