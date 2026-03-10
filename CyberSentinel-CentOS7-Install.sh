@@ -27,7 +27,7 @@ log "${CYAN}=== CyberSentinel Agent Installer (CentOS) ===${NC}"
 echo ""
 
 while true; do
-    read -rp "Enter GitHub Personal Access Token: " GITHUB_TOKEN
+    read -rsp "Enter GitHub Personal Access Token: " GITHUB_TOKEN
     echo ""
 
     if [[ -z "$GITHUB_TOKEN" ]]; then
@@ -37,18 +37,21 @@ while true; do
 
     HEADERS="Authorization: token $GITHUB_TOKEN"
 
-    # Validate token against the private repo
-    HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+    # Validate token by fetching a known file from the private repo
+    HTTP_STATUS=$(curl --tlsv1.2 -k -s -o /dev/null -w "%{http_code}" \
+        --max-time 15 \
         -H "$HEADERS" \
-        "https://api.github.com/repos/cybersentinel-06/CyberSentinel-SIEM")
+        "https://raw.githubusercontent.com/cybersentinel-06/CyberSentinel-SIEM/refs/heads/main/AGENTS/CENTOS-AGENT/ossec.conf")
 
     if [[ "$HTTP_STATUS" == "200" ]]; then
         log "${GREEN}[OK] Token is valid. Repository access confirmed.${NC}"
         break
-    elif [[ "$HTTP_STATUS" == "401" ]]; then
-        log "${RED}[ERROR] Token is invalid or expired (HTTP 401). Please enter a valid token.${NC}"
+    elif [[ "$HTTP_STATUS" == "401" || "$HTTP_STATUS" == "403" ]]; then
+        log "${RED}[ERROR] Token is invalid or expired (HTTP $HTTP_STATUS). Please enter a valid token.${NC}"
     elif [[ "$HTTP_STATUS" == "404" ]]; then
-        log "${RED}[ERROR] Repository not found or token lacks access (HTTP 404). Check permissions.${NC}"
+        log "${RED}[ERROR] File not found in repository (HTTP 404). Check token permissions or repo path.${NC}"
+    elif [[ "$HTTP_STATUS" == "000" ]]; then
+        log "${RED}[ERROR] No response from server (HTTP 000). Check DNS or try: curl --tlsv1.2 -k -v https://raw.githubusercontent.com${NC}"
     else
         log "${RED}[ERROR] Unexpected response (HTTP $HTTP_STATUS). Check your network or token.${NC}"
     fi
@@ -104,7 +107,7 @@ if $AGENT_EXISTS; then
 
             # Re-download config files
             log "[INFO] Fetching ossec.conf from repository..."
-            curl -s -H "$HEADERS" -o /var/ossec/etc/ossec.conf \
+            curl --tlsv1.2 -k -fsSL -H "$HEADERS" -o /var/ossec/etc/ossec.conf \
                 "https://raw.githubusercontent.com/cybersentinel-06/CyberSentinel-SIEM/refs/heads/main/AGENTS/CENTOS-AGENT/ossec.conf?token=$GITHUB_TOKEN"
 
             if [[ $? -ne 0 ]]; then
@@ -121,7 +124,7 @@ if $AGENT_EXISTS; then
             mkdir -p "$BIN_DIR"
 
             for SCRIPT in llm_query.py remove-threat.sh yara.sh; do
-                curl -s -H "$HEADERS" -o "$BIN_DIR/$SCRIPT" \
+                curl --tlsv1.2 -k -fsSL -H "$HEADERS" -o "$BIN_DIR/$SCRIPT" \
                     "https://raw.githubusercontent.com/cybersentinel-06/CyberSentinel-SIEM/refs/heads/main/AGENTS/CENTOS-AGENT/ACTIVE-RESPONSE/$SCRIPT?token=$GITHUB_TOKEN"
                 if [[ $? -ne 0 ]]; then
                     log "${RED}[ERROR] Failed to fetch $SCRIPT.${NC}"
@@ -158,7 +161,7 @@ log "[INFO] Downloading CyberSentinel Agent package (v4.14.0, CentOS)..."
 PACKAGE_URL="https://packages.wazuh.com/4.x/yum/wazuh-agent-4.14.0-1.x86_64.rpm"
 PACKAGE_FILE="/tmp/wazuh-agent-4.14.0-1.x86_64.rpm"
 
-curl -sL -o "$PACKAGE_FILE" "$PACKAGE_URL"
+curl --tlsv1.2 -k -fsSL -o "$PACKAGE_FILE" "$PACKAGE_URL"
 
 if [[ $? -ne 0 || ! -f "$PACKAGE_FILE" ]]; then
     log "${RED}[ERROR] Failed to download CyberSentinel Agent package.${NC}"
@@ -185,8 +188,8 @@ log "${GREEN}[OK] Agent installed successfully.${NC}"
 # ─────────────────────────────────────────────
 log "[INFO] Fetching ossec.conf from repository..."
 
-curl -s -H "$HEADERS" -o /var/ossec/etc/ossec.conf \
-    "https://raw.githubusercontent.com/cybersentinel-06/CyberSentinel-SIEM/refs/heads/main/AGENTS/UBUNTU-AGENT/ossec.conf?token=$GITHUB_TOKEN"
+curl --tlsv1.2 -k -fsSL -H "$HEADERS" -o /var/ossec/etc/ossec.conf \
+    "https://raw.githubusercontent.com/cybersentinel-06/CyberSentinel-SIEM/refs/heads/main/AGENTS/CENTOS-AGENT/ossec.conf?token=$GITHUB_TOKEN"
 
 if [[ $? -ne 0 ]]; then
     log "${RED}[ERROR] Failed to download ossec.conf.${NC}"
@@ -207,8 +210,8 @@ BIN_DIR="/var/ossec/active-response/bin"
 mkdir -p "$BIN_DIR"
 
 for SCRIPT in llm_query.py remove-threat.sh yara.sh; do
-    curl -s -H "$HEADERS" -o "$BIN_DIR/$SCRIPT" \
-        "https://raw.githubusercontent.com/cybersentinel-06/CyberSentinel-SIEM/refs/heads/main/AGENTS/UBUNTU-AGENT/ACTIVE-RESPONSE/$SCRIPT?token=$GITHUB_TOKEN"
+    curl --tlsv1.2 -k -fsSL -H "$HEADERS" -o "$BIN_DIR/$SCRIPT" \
+        "https://raw.githubusercontent.com/cybersentinel-06/CyberSentinel-SIEM/refs/heads/main/AGENTS/CENTOS-AGENT/ACTIVE-RESPONSE/$SCRIPT?token=$GITHUB_TOKEN"
 
     if [[ $? -ne 0 ]]; then
         log "${RED}[ERROR] Failed to fetch $SCRIPT.${NC}"
