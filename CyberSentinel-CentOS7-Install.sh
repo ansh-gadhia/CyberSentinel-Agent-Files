@@ -105,7 +105,7 @@ if $AGENT_EXISTS; then
             # Re-download config files
             log "[INFO] Fetching ossec.conf from repository..."
             curl -s -H "$HEADERS" -o /var/ossec/etc/ossec.conf \
-                "https://raw.githubusercontent.com/cybersentinel-06/CyberSentinel-SIEM/refs/heads/main/AGENTS/UBUNTU-AGENT/ossec.conf?token=$GITHUB_TOKEN"
+                "https://raw.githubusercontent.com/cybersentinel-06/CyberSentinel-SIEM/refs/heads/main/AGENTS/CENTOS-AGENT/ossec.conf?token=$GITHUB_TOKEN"
 
             if [[ $? -ne 0 ]]; then
                 log "${RED}[ERROR] Failed to download ossec.conf. Check token and repo access.${NC}"
@@ -122,7 +122,7 @@ if $AGENT_EXISTS; then
 
             for SCRIPT in llm_query.py remove-threat.sh yara.sh; do
                 curl -s -H "$HEADERS" -o "$BIN_DIR/$SCRIPT" \
-                    "https://raw.githubusercontent.com/cybersentinel-06/CyberSentinel-SIEM/refs/heads/main/AGENTS/UBUNTU-AGENT/ACTIVE-RESPONSE/$SCRIPT?token=$GITHUB_TOKEN"
+                    "https://raw.githubusercontent.com/cybersentinel-06/CyberSentinel-SIEM/refs/heads/main/AGENTS/CENTOS-AGENT/ACTIVE-RESPONSE/$SCRIPT?token=$GITHUB_TOKEN"
                 if [[ $? -ne 0 ]]; then
                     log "${RED}[ERROR] Failed to fetch $SCRIPT.${NC}"
                     exit 1
