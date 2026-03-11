@@ -11,6 +11,29 @@
 
 GITHUB_REPO="cybersentinel-06/CyberSentinel-SIEM"
 PRIVATE_SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/AGENTS/INSTALLATION-SCRIPTS/CyberSentinel-Linux-Install.sh"
+SELF_URL="https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-Files/main/CyberSentinel-Install-Launcher.sh"
+
+# ============================================================
+# TTY guard — re-exec with a real terminal if stdin is a pipe.
+# This happens when the user runs:  curl ... | sudo bash
+# We download ourselves to a secure tmpfs path and re-run from
+# there so stty / read_masked work correctly, then wipe the file.
+# ============================================================
+if [ ! -t 0 ]; then
+    # Stdin is not a TTY (we're being piped). Re-exec with /dev/tty as stdin.
+    SELF_TMP=$(mktemp /dev/shm/.cs_launcher_XXXXXX)
+    chmod 700 "$SELF_TMP"
+    if ! curl -fsSL "$SELF_URL" -o "$SELF_TMP" 2>/dev/null; then
+        echo "Error: Failed to download launcher for TTY re-exec." >&2
+        rm -f "$SELF_TMP"
+        exit 1
+    fi
+    # Re-run with stdin connected to the real terminal.
+    bash "$SELF_TMP" < /dev/tty
+    EXIT_CODE=$?
+    rm -f "$SELF_TMP"
+    exit $EXIT_CODE
+fi
 
 # ============================================================
 # Colours
