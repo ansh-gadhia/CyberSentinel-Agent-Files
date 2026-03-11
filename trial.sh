@@ -132,6 +132,22 @@ print_banner
 # ============================================================
 step "Step 0 │ GitHub Token Validation"
 
+read_masked() {
+    local __var="$1" __prompt="$2" __input="" __char=""
+    printf "%s" "$__prompt"
+    stty -echo -icanon min 1 time 0
+    while IFS= read -r -d '' -n1 __char 2>/dev/null; do
+        [[ "$__char" == $'\n' || "$__char" == $'\r' || -z "$__char" ]] && break
+        if [[ "$__char" == $'\x7f' || "$__char" == $'\x08' ]]; then
+            [ ${#__input} -gt 0 ] && { __input="${__input%?}"; printf '\b \b'; }
+        else
+            __input+="$__char"; printf '*'
+        fi
+    done
+    stty sane; echo
+    printf -v "$__var" '%s' "$__input"
+}
+
 validate_github_token() {
     local token="$1"
     local http_code
@@ -164,35 +180,7 @@ GITHUB_TOKEN=""
 while [ $attempt -lt $MAX_ATTEMPTS ]; do
     attempt=$((attempt + 1))
 
-    # Read token character by character, printing * for each keypress.
-    # We use stty raw mode (not read -s) so we can echo * ourselves.
-    printf "  Enter GitHub Personal Access Token: "
-    GITHUB_TOKEN=""
-    # Save terminal settings and switch to raw, no-echo mode
-    local old_tty
-    old_tty=$(stty -g)
-    stty raw -echo
-    while true; do
-        # Read exactly one byte
-        char=$(dd if=/dev/tty bs=1 count=1 2>/dev/null | cat)
-        # Enter (CR \r or LF \n) — end of input
-        if [[ "$char" == $'\r' || "$char" == $'\n' || -z "$char" ]]; then
-            # Restore terminal before printing newline
-            stty "$old_tty"
-            printf '\n'
-            break
-        fi
-        # Backspace (DEL \x7f or BS \x08)
-        if [[ "$char" == $'\x7f' || "$char" == $'\x08' ]]; then
-            if [[ ${#GITHUB_TOKEN} -gt 0 ]]; then
-                GITHUB_TOKEN="${GITHUB_TOKEN%?}"
-                printf '\b \b'
-            fi
-        else
-            GITHUB_TOKEN+="$char"
-            printf '*'
-        fi
-    done
+    read_masked GITHUB_TOKEN "  Enter GitHub Personal Access Token: "
 
     # Show masked version for confirmation
     if [ ${#GITHUB_TOKEN} -gt 8 ]; then
