@@ -13,12 +13,8 @@ WAZUH_DEB="wazuh-agent_4.14.0-1_amd64.deb"
 WAZUH_PKG_URL="https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/$WAZUH_DEB"
 GITHUB_REPO="cybersentinel-06/CyberSentinel-SIEM"
 WAZUH_AGENT_PORT=1514
-QUOTA_API_PORT=5100
 LOGROTATE_CONF="/etc/logrotate.d/cybersentinel"
-
-YARA_VERSION="4.5.5"
-YARA_SRC_DIR="/usr/local/bin/yara-${YARA_VERSION}"
-YARA_RULES_DIR="/tmp/yara/rules"
+QUOTA_PORT="5100"
 
 # ============================================================
 # Colours
@@ -90,71 +86,22 @@ handle_error() {
 }
 
 # ============================================================
-# [ENHANCEMENT 1] Token masking
-# Pipes all log output through sed so the raw PAT is never
-# written to disk. Called right after the token is validated,
-# before the exec redirect is set up.
+# Rollback trap — cleans up on unexpected exit
 # ============================================================
-#setup_log_masking() {
-#    local escaped_token
-#    escaped_token=$(printf '%s' "$GITHUB_TOKEN" | sed 's/[[\.*^$()+?{|]/\\&/g')
-#    exec > >(sed "s/${escaped_token}/[REDACTED]/g" | tee -a "$LOG_FILE") 2>&1
-#}
-
-# ============================================================
-# [ENHANCEMENT 2] Rollback trap — fully cleans up on failure
-# ============================================================
-ROLLBACK_ENABLED=false
+ROLLBACK_ENABLED=false   # armed after package install begins
 
 rollback() {
     local exit_code=$?
+    # Only roll back if we actually started installing and it failed
     if $ROLLBACK_ENABLED && [ $exit_code -ne 0 ]; then
         echo ""
         warn "Installation failed (exit code $exit_code). Running rollback..."
-
-        # 1. Stop and disable services
-        systemctl stop cybersentinel-agent wazuh-agent suricata &>/dev/null || true
-        systemctl disable cybersentinel-agent suricata &>/dev/null || true
-
-        # 2. Purge Wazuh agent package
-        if dpkg -l wazuh-agent &>/dev/null 2>&1; then
-            dpkg --purge wazuh-agent &>/dev/null || true
-        fi
-
-        # 3. Remove systemd service unit
+        systemctl stop cybersentinel-agent wazuh-agent &>/dev/null || true
+        dpkg --purge wazuh-agent &>/dev/null || true
         rm -f /etc/systemd/system/cybersentinel-agent.service
+        rm -f /tmp/"$WAZUH_DEB"
+        rm -rf /usr/local/bin/yara-4.5.5
         systemctl daemon-reload &>/dev/null || true
-
-        # 4. Remove downloaded .deb
-        rm -f "/tmp/$WAZUH_DEB"
-
-        # 5. Uninstall YARA via make uninstall, then remove source dir
-        if [ -d "$YARA_SRC_DIR" ]; then
-            make uninstall -C "$YARA_SRC_DIR" &>/dev/null || true
-            rm -rf "$YARA_SRC_DIR"
-        fi
-        ldconfig &>/dev/null || true
-
-        # 6. Remove YARA rules
-        rm -rf "$YARA_RULES_DIR"
-
-        # 7. Purge Suricata and its config
-        if dpkg -l suricata &>/dev/null 2>&1; then
-            apt-get remove --purge suricata -y &>/dev/null || true
-        fi
-        rm -f  /etc/suricata/suricata.yaml
-        rm -rf /etc/suricata/rules
-        rm -f  /tmp/emerging.rules.tar.gz
-
-        # 8. Remove active-response scripts
-        rm -f "$BIN_DIR/llm_query.py" "$BIN_DIR/remove-threat.sh" "$BIN_DIR/yara.sh"
-
-        # 9. Remove logrotate config
-        rm -f "$LOGROTATE_CONF"
-
-        # 10. Clean up orphaned build dependencies
-        apt-get autoremove -y &>/dev/null || true
-
         error "Rollback complete. System restored to pre-install state."
         error "Check the log for details: $LOG_FILE"
     fi
@@ -171,7 +118,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # ============================================================
-# Setup log dir early
+# Setup log dir early (before exec redirect)
 # ============================================================
 mkdir -p "$LOG_DIR"
 touch "$LOG_FILE"
@@ -186,12 +133,14 @@ step "Step 0 │ GitHub Token Validation"
 validate_github_token() {
     local token="$1"
     local http_code
+    # 1. Check token is valid (authenticates successfully)
     http_code=$(curl -s -o /dev/null -w "%{http_code}" \
         -H "Authorization: Bearer $token" \
         "https://api.github.com/user")
     if [ "$http_code" -ne 200 ]; then
         return 1
     fi
+    # 2. Check token can actually read the target repo
     http_code=$(curl -s -o /dev/null -w "%{http_code}" \
         -H "Authorization: Bearer $token" \
         "https://api.github.com/repos/$GITHUB_REPO")
@@ -213,12 +162,14 @@ GITHUB_TOKEN=""
 while [ $attempt -lt $MAX_ATTEMPTS ]; do
     attempt=$((attempt + 1))
 
+    # Read token silently (hidden input)
     printf "  Enter GitHub Personal Access Token: "
     stty -echo
     read -r GITHUB_TOKEN
     stty echo
-    echo
+    echo   # newline after hidden input
 
+    # Show masked version for confirmation
     if [ ${#GITHUB_TOKEN} -gt 8 ]; then
         masked="${GITHUB_TOKEN:0:4}$(printf '%0.s*' $(seq 1 $((${#GITHUB_TOKEN} - 8))))${GITHUB_TOKEN: -4}"
     else
@@ -234,6 +185,7 @@ while [ $attempt -lt $MAX_ATTEMPTS ]; do
         success "Token is valid and has access to the repository."
         break
     elif [ $val_result -eq 2 ]; then
+        # Repo access denied — clear message already printed inside function
         error "Please provide a token with 'repo' or 'contents:read' scope (attempt $attempt/$MAX_ATTEMPTS)."
     else
         error "Invalid or expired token (attempt $attempt/$MAX_ATTEMPTS)."
@@ -245,11 +197,6 @@ while [ $attempt -lt $MAX_ATTEMPTS ]; do
     fi
     echo -e "  ${YELLOW}Please try again.${NC}"
 done
-
-# [ENHANCEMENT 1] Activate log masking BEFORE the exec redirect so the
-# token is scrubbed from every line written to disk from here on.
-#setup_log_masking
-success "Log masking active — token will appear as [REDACTED] in $LOG_FILE"
 
 HEADERS="Authorization: Bearer $GITHUB_TOKEN"
 
@@ -264,6 +211,33 @@ while [[ -z "$MANAGER_IP" ]]; do
     read -p "  Enter Manager IP: " MANAGER_IP
 done
 
+# ============================================================
+# STEP 1.1 — Agent Registration Quota Check
+# ============================================================
+echo ""
+echo -e "  ${BOLD}Checking agent registration quota...${NC}"
+
+QUOTA_RESPONSE=$(curl -s --connect-timeout 5 "http://${MANAGER_IP}:${QUOTA_PORT}/api/agents/can-register")
+QUOTA_CURL_EXIT=$?
+
+if [ $QUOTA_CURL_EXIT -ne 0 ]; then
+    error "Cannot reach quota API at ${MANAGER_IP}:${QUOTA_PORT}"
+    exit 1
+fi
+
+QUOTA_ALLOWED=$(echo "$QUOTA_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('allowed', False))" 2>/dev/null)
+QUOTA_REASON=$(echo "$QUOTA_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('reason', 'Unknown'))" 2>/dev/null)
+
+if [ "$QUOTA_ALLOWED" != "True" ]; then
+    error "Registration rejected: $QUOTA_REASON"
+    exit 1
+fi
+
+success "Quota check passed: $QUOTA_REASON"
+
+# ============================================================
+# Reachability check — probe Wazuh agent port
+# ============================================================
 printf "  Checking Manager reachability on port ${WAZUH_AGENT_PORT}..."
 if nc -z -w5 "$MANAGER_IP" "$WAZUH_AGENT_PORT" &>/dev/null; then
     success "Manager is reachable at ${MANAGER_IP}:${WAZUH_AGENT_PORT}."
@@ -299,51 +273,9 @@ while [[ -z "$AGENT_NAME" ]]; do
     read -p "  Enter Agent Name: " AGENT_NAME
 done
 
+# Detect network interface and agent IP
 read -r InterfaceName AgentIP <<< "$(ip -4 -o addr show | grep -v '127.0.0.1' | awk '{print $2, $4}' | cut -d/ -f1 | head -n 1)"
 success "Detected interface: ${InterfaceName} (${AgentIP})"
-
-# ============================================================
-# [ENHANCEMENT 3] STEP 1.5 — Agent Registration Quota Check
-# Runs before any packages are installed so a rejection exits
-# cleanly with zero filesystem changes.
-# ============================================================
-step "Step 1.5 │ Agent Registration Quota"
-
-printf "  Contacting quota API at ${MANAGER_IP}:${QUOTA_API_PORT}..."
-QUOTA_RESPONSE=$(curl -s --connect-timeout 5 \
-    "http://${MANAGER_IP}:${QUOTA_API_PORT}/api/agents/can-register")
-CURL_EXIT=$?
-
-if [ $CURL_EXIT -ne 0 ]; then
-    echo ""
-    error "Cannot reach quota API at ${MANAGER_IP}:${QUOTA_API_PORT} (curl exit ${CURL_EXIT})."
-    error "Verify the SIEM server is running and port ${QUOTA_API_PORT} is accessible."
-    exit 1
-fi
-
-QUOTA_ALLOWED=$(echo "$QUOTA_RESPONSE" | \
-    python3 -c "import sys,json; print(json.load(sys.stdin).get('allowed', False))" 2>/dev/null)
-QUOTA_REASON=$(echo "$QUOTA_RESPONSE" | \
-    python3 -c "import sys,json; print(json.load(sys.stdin).get('reason', 'Unknown'))" 2>/dev/null)
-
-if [ -z "$QUOTA_ALLOWED" ]; then
-    echo ""
-    error "Quota API returned an unexpected or empty response."
-    error "Raw response: ${QUOTA_RESPONSE:-<empty>}"
-    error "Ensure the API is returning valid JSON with an 'allowed' field."
-    exit 1
-fi
-
-if [ "$QUOTA_ALLOWED" != "True" ]; then
-    echo ""
-    error "Registration REJECTED by quota API."
-    error "Reason: ${QUOTA_REASON}"
-    error "Contact your CyberSentinel administrator to increase the agent quota."
-    exit 1
-fi
-
-echo ""
-success "Registration quota confirmed — ${QUOTA_REASON}"
 
 # ============================================================
 # STEP 2 — Check for existing agent installation
@@ -360,6 +292,7 @@ fi
 if $AGENT_EXISTS; then
     warn "An existing CyberSentinel/Wazuh agent installation was detected."
 
+    # Show current agent status
     if systemctl is-active --quiet cybersentinel-agent 2>/dev/null; then
         echo -e "  Service status: ${GREEN}Running (cybersentinel-agent)${NC}"
     elif systemctl is-active --quiet wazuh-agent 2>/dev/null; then
@@ -404,13 +337,16 @@ else
     SKIP_PACKAGE=false
 fi
 
+# Redirect all further output to log (while keeping console output via tee)
+exec > >(tee -a "$LOG_FILE") 2>&1
+
 # ============================================================
 # STEP 3 — Download & Install CyberSentinel Agent package
 # ============================================================
 step "Step 3 │ Agent Package"
 
 if ! $SKIP_PACKAGE; then
-    ROLLBACK_ENABLED=true
+    ROLLBACK_ENABLED=true   # arm rollback — we're about to make changes
     echo -e "  ${BOLD}Downloading agent package...${NC}"
     wget -q "$WAZUH_PKG_URL" -O "/tmp/$WAZUH_DEB" &
     spinner $! "Downloading"
@@ -444,47 +380,58 @@ fi
 # ============================================================
 # STEP 3.5 — Install YARA (latest version from source)
 # ============================================================
-step "Step 3.5 │ YARA v${YARA_VERSION} Installation"
+step "Step 3.5 │ YARA v4.5.5 Installation"
 
+YARA_VERSION="4.5.5"
 YARA_TARBALL="v${YARA_VERSION}.tar.gz"
 YARA_URL="https://github.com/VirusTotal/yara/archive/${YARA_TARBALL}"
+YARA_SRC_DIR="/usr/local/bin/yara-${YARA_VERSION}"
+YARA_RULES_DIR="/tmp/yara/rules"
 
+# 1 — Dependencies
 echo -e "  ${BOLD}Installing YARA build dependencies...${NC}"
 apt-get update -qq &>>"$LOG_FILE"
 apt-get install -y make gcc autoconf libtool libssl-dev pkg-config jq &>>"$LOG_FILE" &
 spinner $! "Installing build dependencies"
 handle_error $? "Failed to install YARA build dependencies."
 
+# 2 — Download source tarball
 echo -e "  ${BOLD}Downloading YARA v${YARA_VERSION} source...${NC}"
 curl -LO "$YARA_URL" &>>"$LOG_FILE" &
 spinner $! "Downloading YARA v${YARA_VERSION}"
 handle_error $? "Failed to download YARA source tarball."
 
+# 3 — Extract directly into /usr/local/bin and remove tarball
 echo -e "  ${BOLD}Extracting YARA source to /usr/local/bin/...${NC}"
 tar -xvzf "$YARA_TARBALL" -C /usr/local/bin/ &>>"$LOG_FILE" \
     && rm -f "$YARA_TARBALL"
 handle_error $? "Failed to extract YARA source."
 
+# 4 — Bootstrap
 echo -e "  ${BOLD}Bootstrapping YARA...${NC}"
 (cd "$YARA_SRC_DIR" && ./bootstrap.sh) &>>"$LOG_FILE" &
 spinner $! "Bootstrapping"
 handle_error $? "YARA bootstrap failed."
 
+# 5 — Configure
 echo -e "  ${BOLD}Configuring YARA...${NC}"
 (cd "$YARA_SRC_DIR" && ./configure) &>>"$LOG_FILE" &
 spinner $! "Configuring"
 handle_error $? "YARA configure failed."
 
+# 6 — Compile
 echo -e "  ${BOLD}Compiling YARA (this may take a moment)...${NC}"
 (cd "$YARA_SRC_DIR" && make) &>>"$LOG_FILE" &
 spinner $! "Compiling"
 handle_error $? "YARA compilation failed."
 
+# 7 — Install
 echo -e "  ${BOLD}Installing YARA...${NC}"
 (cd "$YARA_SRC_DIR" && make install) &>>"$LOG_FILE" &
 spinner $! "Installing YARA"
 handle_error $? "YARA make install failed."
 
+# 8 — Run test suite
 echo -e "  ${BOLD}Running YARA test suite...${NC}"
 (cd "$YARA_SRC_DIR" && make check) &>>"$LOG_FILE" &
 spinner $! "Running make check"
@@ -494,8 +441,10 @@ else
     success "YARA test suite passed."
 fi
 
+# 9 — Update shared library cache
 ldconfig &>>"$LOG_FILE"
 
+# 10 — Verify binary
 YARA_INSTALLED_VER=$(yara --version 2>/dev/null || true)
 if [ -n "$YARA_INSTALLED_VER" ]; then
     success "YARA ${YARA_INSTALLED_VER} installed successfully → $(command -v yara)"
@@ -503,6 +452,7 @@ else
     warn "YARA binary not found in PATH after install — check $LOG_FILE for details."
 fi
 
+# 11 — Download Valhalla community YARA rules
 echo -e "  ${BOLD}Downloading Valhalla community YARA rules...${NC}"
 mkdir -p "$YARA_RULES_DIR"
 curl -s \
@@ -540,11 +490,6 @@ handle_error $? "Failed to download ossec.conf from GitHub."
 sed -i "s/\${ManagerIP}/$MANAGER_IP/g"   /var/ossec/etc/ossec.conf
 sed -i "s/\${AgentName}/$AGENT_NAME/g"   /var/ossec/etc/ossec.conf
 success "ossec.conf applied and placeholders replaced."
-
-# [ENHANCEMENT 1] Token no longer needed — scrub from memory
-unset GITHUB_TOKEN
-unset HEADERS
-success "GitHub token cleared from memory."
 
 # ============================================================
 # STEP 5 — Systemd service setup
@@ -614,7 +559,7 @@ curl -s -H "$HEADERS" -o /etc/suricata/suricata.yaml \
 spinner $! "Downloading suricata.yaml"
 handle_error $? "Failed to download suricata.yaml."
 
-sed -i "s/AgentIP/$AgentIP/g"             /etc/suricata/suricata.yaml
+sed -i "s/AgentIP/$AgentIP/g"           /etc/suricata/suricata.yaml
 sed -i "s/InterfaceName/$InterfaceName/g" /etc/suricata/suricata.yaml
 
 systemctl restart suricata &>>"$LOG_FILE" &
@@ -657,7 +602,7 @@ success "Logs will rotate weekly, keeping 8 compressed archives."
 # ============================================================
 step "Step 10 │ Post-Install Verification"
 
-sleep 2
+sleep 2  # Give service a moment to settle
 
 CS_STATUS=$(systemctl is-active cybersentinel-agent 2>/dev/null)
 SURICATA_STATUS=$(systemctl is-active suricata 2>/dev/null)
@@ -681,6 +626,7 @@ else
     warn "yara                 →  ${RED}not found${NC}"
 fi
 
+# Disarm rollback — installation succeeded
 ROLLBACK_ENABLED=false
 
 # ============================================================
