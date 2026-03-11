@@ -95,11 +95,11 @@ handle_error() {
 # written to disk. Called right after the token is validated,
 # before the exec redirect is set up.
 # ============================================================
-setup_log_masking() {
-    local escaped_token
-    escaped_token=$(printf '%s' "$GITHUB_TOKEN" | sed 's/[[\.*^$()+?{|]/\\&/g')
-    exec > >(sed "s/${escaped_token}/[REDACTED]/g" | tee -a "$LOG_FILE") 2>&1
-}
+#setup_log_masking() {
+#    local escaped_token
+#    escaped_token=$(printf '%s' "$GITHUB_TOKEN" | sed 's/[[\.*^$()+?{|]/\\&/g')
+#    exec > >(sed "s/${escaped_token}/[REDACTED]/g" | tee -a "$LOG_FILE") 2>&1
+#}
 
 # ============================================================
 # [ENHANCEMENT 2] Rollback trap — fully cleans up on failure
@@ -248,7 +248,7 @@ done
 
 # [ENHANCEMENT 1] Activate log masking BEFORE the exec redirect so the
 # token is scrubbed from every line written to disk from here on.
-setup_log_masking
+#setup_log_masking
 success "Log masking active — token will appear as [REDACTED] in $LOG_FILE"
 
 HEADERS="Authorization: Bearer $GITHUB_TOKEN"
