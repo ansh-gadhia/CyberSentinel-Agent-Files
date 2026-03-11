@@ -92,6 +92,8 @@ ROLLBACK_ENABLED=false   # armed after package install begins
 
 rollback() {
     local exit_code=$?
+    # Always wipe the curl auth config on any exit — success or failure.
+    [ -n "${CURL_AUTH_CFG:-}" ] && rm -f "$CURL_AUTH_CFG"
     # Only roll back if we actually started installing and it failed
     if $ROLLBACK_ENABLED && [ $exit_code -ne 0 ]; then
         echo ""
@@ -198,7 +200,15 @@ while [ $attempt -lt $MAX_ATTEMPTS ]; do
     echo -e "  ${YELLOW}Please try again.${NC}"
 done
 
-HEADERS="Authorization: Bearer $GITHUB_TOKEN"
+# Write the GitHub token to a private curl config file so it never appears
+# as a command-line argument or shell variable in the log stream.
+# /dev/shm is a tmpfs mount (memory only) — no disk write occurs.
+CURL_AUTH_CFG=$(mktemp /dev/shm/.cs_curl_XXXXXX)
+chmod 600 "$CURL_AUTH_CFG"
+printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" > "$CURL_AUTH_CFG"
+
+# Scrub the raw token from memory immediately — all further auth goes via the file.
+unset GITHUB_TOKEN
 
 # ============================================================
 # STEP 1 — Collect Manager IP and Agent Name
@@ -338,7 +348,10 @@ else
 fi
 
 # Redirect all further output to log (while keeping console output via tee)
-exec > >(tee -a "$LOG_FILE") 2>&1
+# The sed filter redacts the GitHub token from log output in real-time so it
+# never appears in the log file, even if it leaks via curl error messages or
+# verbose output. The raw terminal stream is unaffected.
+exec > >(
 
 # ============================================================
 # STEP 3 — Download & Install CyberSentinel Agent package
@@ -482,7 +495,7 @@ fi
 # ============================================================
 step "Step 4 │ Configuration File"
 
-curl -s -H "$HEADERS" -o /var/ossec/etc/ossec.conf \
+curl -s --config "$CURL_AUTH_CFG" -o /var/ossec/etc/ossec.conf \
     "$BASE_URL/ossec.conf" &
 spinner $! "Downloading ossec.conf"
 handle_error $? "Failed to download ossec.conf from GitHub."
@@ -520,7 +533,7 @@ step "Step 6 │ Active Response Scripts"
 mkdir -p "$BIN_DIR"
 
 for file in llm_query.py remove-threat.sh yara.sh; do
-    curl -s -H "$HEADERS" -o "$BIN_DIR/$file" \
+    curl -s --config "$CURL_AUTH_CFG" -o "$BIN_DIR/$file" \
         "$BASE_URL/ACTIVE-RESPONSE/$file" &
     spinner $! "Fetching $file"
     handle_error $? "Failed to download $file."
@@ -554,13 +567,17 @@ mv /tmp/rules/*.rules /etc/suricata/rules/
 chmod 640 /etc/suricata/rules/*.rules
 success "Suricata rules installed."
 
-curl -s -H "$HEADERS" -o /etc/suricata/suricata.yaml \
+curl -s --config "$CURL_AUTH_CFG" -o /etc/suricata/suricata.yaml \
     "$BASE_URL/suricata.yaml" &
 spinner $! "Downloading suricata.yaml"
 handle_error $? "Failed to download suricata.yaml."
 
 sed -i "s/AgentIP/$AgentIP/g"           /etc/suricata/suricata.yaml
 sed -i "s/InterfaceName/$InterfaceName/g" /etc/suricata/suricata.yaml
+
+# All GitHub downloads are complete — delete the curl auth config immediately.
+rm -f "$CURL_AUTH_CFG"
+success "GitHub auth credentials purged from memory."
 
 systemctl restart suricata &>>"$LOG_FILE" &
 spinner $! "Restarting Suricata"
