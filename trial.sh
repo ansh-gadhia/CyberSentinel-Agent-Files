@@ -90,27 +90,21 @@ handle_error() {
 }
 
 # ============================================================
-# Token masking — scrubs the PAT from all log output.
-# Called once after the token is captured, before exec redirect.
+# [ENHANCEMENT 1] Token masking
+# Pipes all log output through sed so the raw PAT is never
+# written to disk. Called right after the token is validated,
+# before the exec redirect is set up.
 # ============================================================
 setup_log_masking() {
-    # Build a sed expression that replaces every occurrence of the raw
-    # token with [REDACTED].  We escape special regex chars in the token
-    # so the sed pattern is always valid.
     local escaped_token
     escaped_token=$(printf '%s' "$GITHUB_TOKEN" | sed 's/[[\.*^$()+?{|]/\\&/g')
-
-    mkdir -p "$LOG_DIR"
-    touch "$LOG_FILE"
-
-    # Replace the exec redirect with one that pipes through the masking filter.
     exec > >(sed "s/${escaped_token}/[REDACTED]/g" | tee -a "$LOG_FILE") 2>&1
 }
 
 # ============================================================
-# Rollback trap — cleans up on unexpected exit
+# [ENHANCEMENT 2] Rollback trap — fully cleans up on failure
 # ============================================================
-ROLLBACK_ENABLED=false   # armed after package install begins
+ROLLBACK_ENABLED=false
 
 rollback() {
     local exit_code=$?
@@ -118,53 +112,47 @@ rollback() {
         echo ""
         warn "Installation failed (exit code $exit_code). Running rollback..."
 
-        # ── 1. Stop and remove services ──────────────────────────────
+        # 1. Stop and disable services
         systemctl stop cybersentinel-agent wazuh-agent suricata &>/dev/null || true
         systemctl disable cybersentinel-agent suricata &>/dev/null || true
 
-        # ── 2. Purge Wazuh agent package ─────────────────────────────
-        if dpkg -l wazuh-agent &>/dev/null; then
+        # 2. Purge Wazuh agent package
+        if dpkg -l wazuh-agent &>/dev/null 2>&1; then
             dpkg --purge wazuh-agent &>/dev/null || true
-            success "wazuh-agent package purged."
         fi
 
-        # ── 3. Remove systemd service unit ───────────────────────────
+        # 3. Remove systemd service unit
         rm -f /etc/systemd/system/cybersentinel-agent.service
         systemctl daemon-reload &>/dev/null || true
 
-        # ── 4. Remove downloaded .deb ────────────────────────────────
+        # 4. Remove downloaded .deb
         rm -f "/tmp/$WAZUH_DEB"
 
-        # ── 5. Uninstall YARA (make uninstall if src dir exists) ──────
+        # 5. Uninstall YARA via make uninstall, then remove source dir
         if [ -d "$YARA_SRC_DIR" ]; then
-            warn "Uninstalling YARA via make uninstall..."
             make uninstall -C "$YARA_SRC_DIR" &>/dev/null || true
             rm -rf "$YARA_SRC_DIR"
-            success "YARA uninstalled and source directory removed."
         fi
-        # Refresh linker cache after removing YARA libs
         ldconfig &>/dev/null || true
 
-        # ── 6. Remove YARA rules ─────────────────────────────────────
+        # 6. Remove YARA rules
         rm -rf "$YARA_RULES_DIR"
 
-        # ── 7. Purge Suricata ────────────────────────────────────────
+        # 7. Purge Suricata and its config
         if dpkg -l suricata &>/dev/null 2>&1; then
-            warn "Purging Suricata..."
             apt-get remove --purge suricata -y &>/dev/null || true
-            success "Suricata purged."
         fi
         rm -f  /etc/suricata/suricata.yaml
         rm -rf /etc/suricata/rules
         rm -f  /tmp/emerging.rules.tar.gz
 
-        # ── 8. Remove active-response scripts ────────────────────────
+        # 8. Remove active-response scripts
         rm -f "$BIN_DIR/llm_query.py" "$BIN_DIR/remove-threat.sh" "$BIN_DIR/yara.sh"
 
-        # ── 9. Remove logrotate config ───────────────────────────────
+        # 9. Remove logrotate config
         rm -f "$LOGROTATE_CONF"
 
-        # ── 10. Final apt cleanup ─────────────────────────────────────
+        # 10. Clean up orphaned build dependencies
         apt-get autoremove -y &>/dev/null || true
 
         error "Rollback complete. System restored to pre-install state."
@@ -183,7 +171,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # ============================================================
-# Setup log dir early (before exec redirect)
+# Setup log dir early
 # ============================================================
 mkdir -p "$LOG_DIR"
 touch "$LOG_FILE"
@@ -198,14 +186,12 @@ step "Step 0 │ GitHub Token Validation"
 validate_github_token() {
     local token="$1"
     local http_code
-    # 1. Check token is valid (authenticates successfully)
     http_code=$(curl -s -o /dev/null -w "%{http_code}" \
         -H "Authorization: Bearer $token" \
         "https://api.github.com/user")
     if [ "$http_code" -ne 200 ]; then
         return 1
     fi
-    # 2. Check token can actually read the target repo
     http_code=$(curl -s -o /dev/null -w "%{http_code}" \
         -H "Authorization: Bearer $token" \
         "https://api.github.com/repos/$GITHUB_REPO")
@@ -227,14 +213,12 @@ GITHUB_TOKEN=""
 while [ $attempt -lt $MAX_ATTEMPTS ]; do
     attempt=$((attempt + 1))
 
-    # Read token silently (hidden input)
     printf "  Enter GitHub Personal Access Token: "
     stty -echo
     read -r GITHUB_TOKEN
     stty echo
-    echo   # newline after hidden input
+    echo
 
-    # Show masked version for confirmation
     if [ ${#GITHUB_TOKEN} -gt 8 ]; then
         masked="${GITHUB_TOKEN:0:4}$(printf '%0.s*' $(seq 1 $((${#GITHUB_TOKEN} - 8))))${GITHUB_TOKEN: -4}"
     else
@@ -262,8 +246,8 @@ while [ $attempt -lt $MAX_ATTEMPTS ]; do
     echo -e "  ${YELLOW}Please try again.${NC}"
 done
 
-# ── Token masking: must be called BEFORE exec redirect so every byte
-#    written to the log from this point forward is scrubbed. ──────────
+# [ENHANCEMENT 1] Activate log masking BEFORE the exec redirect so the
+# token is scrubbed from every line written to disk from here on.
 setup_log_masking
 success "Log masking active — token will appear as [REDACTED] in $LOG_FILE"
 
@@ -280,7 +264,6 @@ while [[ -z "$MANAGER_IP" ]]; do
     read -p "  Enter Manager IP: " MANAGER_IP
 done
 
-# Reachability check — probe Wazuh agent port
 printf "  Checking Manager reachability on port ${WAZUH_AGENT_PORT}..."
 if nc -z -w5 "$MANAGER_IP" "$WAZUH_AGENT_PORT" &>/dev/null; then
     success "Manager is reachable at ${MANAGER_IP}:${WAZUH_AGENT_PORT}."
@@ -316,18 +299,15 @@ while [[ -z "$AGENT_NAME" ]]; do
     read -p "  Enter Agent Name: " AGENT_NAME
 done
 
-# Detect network interface and agent IP
 read -r InterfaceName AgentIP <<< "$(ip -4 -o addr show | grep -v '127.0.0.1' | awk '{print $2, $4}' | cut -d/ -f1 | head -n 1)"
 success "Detected interface: ${InterfaceName} (${AgentIP})"
 
 # ============================================================
-# STEP 1.5 — Agent Quota Check
+# [ENHANCEMENT 3] STEP 1.5 — Agent Registration Quota Check
+# Runs before any packages are installed so a rejection exits
+# cleanly with zero filesystem changes.
 # ============================================================
 step "Step 1.5 │ Agent Registration Quota"
-
-# The quota API uses the Manager IP collected in Step 1.
-# We probe it before touching the filesystem so a rejection
-# costs nothing and leaves the system completely clean.
 
 printf "  Contacting quota API at ${MANAGER_IP}:${QUOTA_API_PORT}..."
 QUOTA_RESPONSE=$(curl -s --connect-timeout 5 \
@@ -341,14 +321,11 @@ if [ $CURL_EXIT -ne 0 ]; then
     exit 1
 fi
 
-# Parse JSON response — requires python3, which is present on all
-# supported Ubuntu releases (20.04 / 22.04 / 24.04).
 QUOTA_ALLOWED=$(echo "$QUOTA_RESPONSE" | \
     python3 -c "import sys,json; print(json.load(sys.stdin).get('allowed', False))" 2>/dev/null)
 QUOTA_REASON=$(echo "$QUOTA_RESPONSE" | \
     python3 -c "import sys,json; print(json.load(sys.stdin).get('reason', 'Unknown'))" 2>/dev/null)
 
-# Guard against malformed / empty response
 if [ -z "$QUOTA_ALLOWED" ]; then
     echo ""
     error "Quota API returned an unexpected or empty response."
@@ -383,7 +360,6 @@ fi
 if $AGENT_EXISTS; then
     warn "An existing CyberSentinel/Wazuh agent installation was detected."
 
-    # Show current agent status
     if systemctl is-active --quiet cybersentinel-agent 2>/dev/null; then
         echo -e "  Service status: ${GREEN}Running (cybersentinel-agent)${NC}"
     elif systemctl is-active --quiet wazuh-agent 2>/dev/null; then
@@ -434,7 +410,7 @@ fi
 step "Step 3 │ Agent Package"
 
 if ! $SKIP_PACKAGE; then
-    ROLLBACK_ENABLED=true   # arm rollback — we're about to make changes
+    ROLLBACK_ENABLED=true
     echo -e "  ${BOLD}Downloading agent package...${NC}"
     wget -q "$WAZUH_PKG_URL" -O "/tmp/$WAZUH_DEB" &
     spinner $! "Downloading"
@@ -468,55 +444,47 @@ fi
 # ============================================================
 # STEP 3.5 — Install YARA (latest version from source)
 # ============================================================
-step "Step 3.5 │ YARA v4.5.5 Installation"
+step "Step 3.5 │ YARA v${YARA_VERSION} Installation"
 
 YARA_TARBALL="v${YARA_VERSION}.tar.gz"
 YARA_URL="https://github.com/VirusTotal/yara/archive/${YARA_TARBALL}"
 
-# 1 — Dependencies
 echo -e "  ${BOLD}Installing YARA build dependencies...${NC}"
 apt-get update -qq &>>"$LOG_FILE"
 apt-get install -y make gcc autoconf libtool libssl-dev pkg-config jq &>>"$LOG_FILE" &
 spinner $! "Installing build dependencies"
 handle_error $? "Failed to install YARA build dependencies."
 
-# 2 — Download source tarball
 echo -e "  ${BOLD}Downloading YARA v${YARA_VERSION} source...${NC}"
 curl -LO "$YARA_URL" &>>"$LOG_FILE" &
 spinner $! "Downloading YARA v${YARA_VERSION}"
 handle_error $? "Failed to download YARA source tarball."
 
-# 3 — Extract directly into /usr/local/bin and remove tarball
 echo -e "  ${BOLD}Extracting YARA source to /usr/local/bin/...${NC}"
 tar -xvzf "$YARA_TARBALL" -C /usr/local/bin/ &>>"$LOG_FILE" \
     && rm -f "$YARA_TARBALL"
 handle_error $? "Failed to extract YARA source."
 
-# 4 — Bootstrap
 echo -e "  ${BOLD}Bootstrapping YARA...${NC}"
 (cd "$YARA_SRC_DIR" && ./bootstrap.sh) &>>"$LOG_FILE" &
 spinner $! "Bootstrapping"
 handle_error $? "YARA bootstrap failed."
 
-# 5 — Configure
 echo -e "  ${BOLD}Configuring YARA...${NC}"
 (cd "$YARA_SRC_DIR" && ./configure) &>>"$LOG_FILE" &
 spinner $! "Configuring"
 handle_error $? "YARA configure failed."
 
-# 6 — Compile
 echo -e "  ${BOLD}Compiling YARA (this may take a moment)...${NC}"
 (cd "$YARA_SRC_DIR" && make) &>>"$LOG_FILE" &
 spinner $! "Compiling"
 handle_error $? "YARA compilation failed."
 
-# 7 — Install
 echo -e "  ${BOLD}Installing YARA...${NC}"
 (cd "$YARA_SRC_DIR" && make install) &>>"$LOG_FILE" &
 spinner $! "Installing YARA"
 handle_error $? "YARA make install failed."
 
-# 8 — Run test suite
 echo -e "  ${BOLD}Running YARA test suite...${NC}"
 (cd "$YARA_SRC_DIR" && make check) &>>"$LOG_FILE" &
 spinner $! "Running make check"
@@ -526,10 +494,8 @@ else
     success "YARA test suite passed."
 fi
 
-# 9 — Update shared library cache
 ldconfig &>>"$LOG_FILE"
 
-# 10 — Verify binary
 YARA_INSTALLED_VER=$(yara --version 2>/dev/null || true)
 if [ -n "$YARA_INSTALLED_VER" ]; then
     success "YARA ${YARA_INSTALLED_VER} installed successfully → $(command -v yara)"
@@ -537,7 +503,6 @@ else
     warn "YARA binary not found in PATH after install — check $LOG_FILE for details."
 fi
 
-# 11 — Download Valhalla community YARA rules
 echo -e "  ${BOLD}Downloading Valhalla community YARA rules...${NC}"
 mkdir -p "$YARA_RULES_DIR"
 curl -s \
@@ -576,7 +541,7 @@ sed -i "s/\${ManagerIP}/$MANAGER_IP/g"   /var/ossec/etc/ossec.conf
 sed -i "s/\${AgentName}/$AGENT_NAME/g"   /var/ossec/etc/ossec.conf
 success "ossec.conf applied and placeholders replaced."
 
-# ── Token no longer needed — scrub from memory ───────────────────────
+# [ENHANCEMENT 1] Token no longer needed — scrub from memory
 unset GITHUB_TOKEN
 unset HEADERS
 success "GitHub token cleared from memory."
@@ -649,7 +614,7 @@ curl -s -H "$HEADERS" -o /etc/suricata/suricata.yaml \
 spinner $! "Downloading suricata.yaml"
 handle_error $? "Failed to download suricata.yaml."
 
-sed -i "s/AgentIP/$AgentIP/g"           /etc/suricata/suricata.yaml
+sed -i "s/AgentIP/$AgentIP/g"             /etc/suricata/suricata.yaml
 sed -i "s/InterfaceName/$InterfaceName/g" /etc/suricata/suricata.yaml
 
 systemctl restart suricata &>>"$LOG_FILE" &
@@ -692,7 +657,7 @@ success "Logs will rotate weekly, keeping 8 compressed archives."
 # ============================================================
 step "Step 10 │ Post-Install Verification"
 
-sleep 2  # Give service a moment to settle
+sleep 2
 
 CS_STATUS=$(systemctl is-active cybersentinel-agent 2>/dev/null)
 SURICATA_STATUS=$(systemctl is-active suricata 2>/dev/null)
@@ -716,7 +681,6 @@ else
     warn "yara                 →  ${RED}not found${NC}"
 fi
 
-# Disarm rollback — installation succeeded
 ROLLBACK_ENABLED=false
 
 # ============================================================
