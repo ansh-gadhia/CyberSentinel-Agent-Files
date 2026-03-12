@@ -96,9 +96,13 @@ try {
     # ────────────────────────────────────────────────────────────
     Clear-Host
     Write-Host ""
-    Write-Host "  ╔══════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  ║    CyberSentinel Agent  ·  Installation      ║" -ForegroundColor Cyan
-    Write-Host "  ╚══════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host "  ██████╗██╗   ██╗██████╗ ███████╗██████╗" -ForegroundColor Cyan
+    Write-Host " ██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗" -ForegroundColor Cyan
+    Write-Host " ██║      ╚████╔╝ ██████╔╝█████╗  ██████╔╝" -ForegroundColor Cyan
+    Write-Host " ██║       ╚██╔╝  ██╔══██╗██╔══╝  ██╔══██╗" -ForegroundColor Cyan
+    Write-Host " ╚██████╗   ██║   ██████╔╝███████╗██║  ██║" -ForegroundColor Cyan
+    Write-Host "  ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝" -ForegroundColor Cyan
+    Write-Host "       S E N T I N E L   I N S T A L L E R" -ForegroundColor Cyan
     Write-Host ""
 
     # ────────────────────────────────────────────────────────────
