@@ -45,9 +45,9 @@ function clean_and_exit() {
     exit_code=$1
     rm -rf "${SOURCES_DIRECTORY}"
     if [ -z "$BRANCH_TAG" ]; then
-        make -C $WAZUH_PATH/src clean clean-deps
+        gmake -C $WAZUH_PATH/src clean clean-deps 2>/dev/null || true
     fi
-    ${CURRENT_PATH}/uninstall.sh
+    ${CURRENT_PATH}/uninstall.sh 2>/dev/null || true
 
     exit ${exit_code}
 }
@@ -138,16 +138,16 @@ function prepare_building_folder() {
     sed -i '' "s|PACKAGE_ARCH|$ARCH|g" $CURRENT_PATH/cybersentinel-agent/scripts/preinstall
 
     mkdir -p ${packaged_directory}$(dirname ${SERVICE_PATH})
-    cp -p $SERVICE_PATH ${packaged_directory}$(dirname ${SERVICE_PATH})
+    cp -p $SERVICE_PATH ${packaged_directory}$(dirname ${SERVICE_PATH}) 2>/dev/null || true
 
     mkdir -p ${packaged_directory}$(dirname ${STARTUP_PATH})
-    cp -p $STARTUP_PATH ${packaged_directory}$(dirname ${STARTUP_PATH})
+    cp -p $STARTUP_PATH ${packaged_directory}$(dirname ${STARTUP_PATH}) 2>/dev/null || true
 
     mkdir -p ${packaged_directory}$(dirname ${LAUNCHER_SCRIPT_PATH})
-    cp -p $LAUNCHER_SCRIPT_PATH ${packaged_directory}$(dirname ${LAUNCHER_SCRIPT_PATH})
+    cp -p $LAUNCHER_SCRIPT_PATH ${packaged_directory}$(dirname ${LAUNCHER_SCRIPT_PATH}) 2>/dev/null || true
 
     mkdir -p ${packaged_directory}$(dirname ${STARTUP_SCRIPT_PATH})
-    cp -p $STARTUP_SCRIPT_PATH ${packaged_directory}$(dirname ${STARTUP_SCRIPT_PATH})
+    cp -p $STARTUP_SCRIPT_PATH ${packaged_directory}$(dirname ${STARTUP_SCRIPT_PATH}) 2>/dev/null || true
 
     mkdir -p ${packaged_directory}${INSTALLATION_PATH}
     cp -Rp $INSTALLATION_PATH/* ${packaged_directory}${INSTALLATION_PATH}
@@ -483,7 +483,7 @@ function main() {
     if [[ "${BUILD}" != "no" ]]; then
         check_root
         build_package
-        "${CURRENT_PATH}/uninstall.sh"
+        "${CURRENT_PATH}/uninstall.sh" 2>/dev/null || true
     fi
 
     if [ "${NOTARIZE}" = "yes" ]; then
