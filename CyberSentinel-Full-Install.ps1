@@ -331,7 +331,7 @@ try {
     $job = Start-Job -ScriptBlock {
         param($lf)
         $ProgressPreference = "SilentlyContinue"
-        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-Files/main/ca.cer" `
+        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-Files/main/ca-4.14.2.cer" `
             -OutFile "$env:TEMP\ca.cer" -UseBasicParsing 2>&1 | Out-File $lf -Append
         Import-Certificate -FilePath "$env:TEMP\ca.cer" `
             -CertStoreLocation Cert:\LocalMachine\Root 2>&1 | Out-File $lf -Append
@@ -351,7 +351,7 @@ try {
         param($ip, $name, $msiLog, $lf)
         $ProgressPreference = "SilentlyContinue"
         Invoke-WebRequest `
-            -Uri "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent-1.0.0.msi" `
+            -Uri "https://github.com/ansh-gadhia/CyberSentinel-Agent-Files/releases/download/1.0.0/cybersentinel-agent-4.14.2.msi" `
             -OutFile "$env:TEMP\cybersentinel-agent.msi" `
             -UseBasicParsing 2>&1 | Out-File $lf -Append
         $installArgs = "/i `"$env:TEMP\cybersentinel-agent.msi`" /qn /norestart " +
