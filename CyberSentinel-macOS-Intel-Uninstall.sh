@@ -116,14 +116,14 @@ fi
 
 # Display what was found
 echo ""
-printf "  %-35s %s\n" "CyberSentinel agent ($OSSEC_DIR)" "$($FOUND_AGENT  && echo "${GREEN}found${NC}" || echo "${YELLOW}not found${NC}")"
-printf "  %-35s %s\n" "launchd plist"                    "$($FOUND_PLIST  && echo "${GREEN}found${NC}" || echo "${YELLOW}not found${NC}")"
-printf "  %-35s %s\n" "cybersentinel-control binary"     "$($FOUND_CONTROL && echo "${GREEN}found${NC}" || echo "${YELLOW}not found${NC}")"
-printf "  %-35s %s\n" "YARA ($YARA_PREFIX)"              "$($FOUND_YARA && echo "${GREEN}found${NC}" || echo "${YELLOW}not found${NC}")"
-printf "  %-35s %s\n" "Suricata"                         "$($FOUND_SURICATA && echo "${GREEN}found${NC}" || echo "${YELLOW}not found${NC}")"
-printf "  %-35s %s\n" "CA certificate (System Keychain)" "$($FOUND_CERT && echo "${GREEN}found${NC}" || echo "${YELLOW}not found${NC}")"
+printf "  %-35s %b\n" "CyberSentinel agent ($OSSEC_DIR)" "$($FOUND_AGENT  && echo "${GREEN}found${NC}" || echo "${YELLOW}not found${NC}")"
+printf "  %-35s %b\n" "launchd plist"                    "$($FOUND_PLIST  && echo "${GREEN}found${NC}" || echo "${YELLOW}not found${NC}")"
+printf "  %-35s %b\n" "cybersentinel-control binary"     "$($FOUND_CONTROL && echo "${GREEN}found${NC}" || echo "${YELLOW}not found${NC}")"
+printf "  %-35s %b\n" "YARA ($YARA_PREFIX)"              "$($FOUND_YARA && echo "${GREEN}found${NC}" || echo "${YELLOW}not found${NC}")"
+printf "  %-35s %b\n" "Suricata"                         "$($FOUND_SURICATA && echo "${GREEN}found${NC}" || echo "${YELLOW}not found${NC}")"
+printf "  %-35s %b\n" "CA certificate (System Keychain)" "$($FOUND_CERT && echo "${GREEN}found${NC}" || echo "${YELLOW}not found${NC}")"
 if $FOUND_WAZUH_REMNANT; then
-    printf "  %-35s %s\n" "Stale Wazuh remnant" "${YELLOW}found — will clean${NC}"
+    printf "  %-35s %b\n" "Stale Wazuh remnant" "${YELLOW}found — will clean${NC}"
 fi
 echo -e "${NC}"
 
@@ -137,11 +137,17 @@ fi
 
 # ============================================================
 # Confirmation prompt
+# Opens /dev/tty so the read works even when stdin is a pipe
+# (e.g. curl … | sudo bash)
 # ============================================================
 echo -e "  ${BOLD}${RED}This will permanently remove all CyberSentinel"
 echo -e "  components listed above from this machine.${NC}"
 echo ""
-read -p "  Are you sure you want to proceed? (yes/no): " CONFIRM
+
+exec 3</dev/tty
+read -p "  Are you sure you want to proceed? (yes/no): " CONFIRM <&3
+exec 3<&-
+
 if [[ "$CONFIRM" != "yes" ]]; then
     echo -e "\n${YELLOW}  Uninstallation cancelled. No changes made.${NC}\n"
     exit 0
