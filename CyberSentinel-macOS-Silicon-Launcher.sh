@@ -29,26 +29,6 @@ for _candidate in /opt/homebrew/bin/bash /usr/local/bin/bash; do
     fi
 done
 
-# If no bash 4+ found, we'll use /bin/bash and patch &>> on the fly
-# by pre-processing the streamed script through sed before piping to bash.
-# &>> FILE   →   >> FILE 2>&1
-# &>  FILE   →   > FILE 2>&1
-patch_bash4_syntax() {
-    sed \
-        -e 's/&>>[[:space:]]*/\>\>__SEDTMP__ 2>\&1 #/g' \
-        -e 's/__SEDTMP__//g' \
-        -e 's/&>[[:space:]]*/\>__SEDTMP__ 2>\&1 #/g' \
-        -e 's/__SEDTMP__//g'
-}
-# Cleaner approach — simple stream substitution without temp markers:
-patch_bash4_syntax() {
-    perl -pe '
-        s/([^2])\&>>/\1>>__P__/g;
-        s/>>__P__\s*(\S+)/>> $1 2>>\&1/g;
-        s/([^2])\&>\s*(\S+)/\1> $2 2>\&1/g;
-    ' 2>/dev/null || cat   # fallback: pass through unchanged if perl absent
-}
-
 # ============================================================
 # TTY guard — re-exec with a real terminal if stdin is a pipe.
 # Triggered when the user runs: curl ... | sudo bash
@@ -87,7 +67,7 @@ error()   { echo -e "  ${RED}✘ ${1}${NC}" >&2; }
 # ============================================================
 cleanup() {
     unset CS_GITHUB_TOKEN CS_TOKEN_PREVALIDATED _RAW_TOKEN
-    [ -n "${SELF_TMP:-}" ] && rm -f "$SELF_TMP"
+    [ -n "${SELF_TMP:-}" ]    && rm -f "$SELF_TMP"
     [ -n "${INSTALL_TMP:-}" ] && rm -f "$INSTALL_TMP"
 }
 trap cleanup EXIT
@@ -133,15 +113,14 @@ if [ "$OS_MAJOR" -lt 11 ]; then
 fi
 
 # ============================================================
-# Masked token input
+# Masked token input — same logic as Intel launcher.
+# The TTY guard above ensures we always have a real terminal
+# by the time read_masked is called, so stty sane is safe.
 # ============================================================
 read_masked() {
     local __var="$1" __prompt="$2" __input="" __char=""
     printf "%s" "$__prompt"
-    # Save and set terminal settings
-    local _old_stty
-    _old_stty=$(stty -g 2>/dev/null)
-    stty -echo -icanon min 1 time 0 2>/dev/null
+    stty -echo -icanon min 1 time 0
     while IFS= read -r -d '' -n1 __char 2>/dev/null; do
         [[ "$__char" == $'\n' || "$__char" == $'\r' || -z "$__char" ]] && break
         if [[ "$__char" == $'\x7f' || "$__char" == $'\x08' ]]; then
@@ -150,13 +129,7 @@ read_masked() {
             __input+="$__char"; printf '*'
         fi
     done
-    # Restore terminal settings precisely — avoids "Interrupted system call" on stty sane
-    if [ -n "$_old_stty" ]; then
-        stty "$_old_stty" 2>/dev/null
-    else
-        stty sane 2>/dev/null
-    fi
-    echo
+    stty sane; echo
     printf -v "$__var" '%s' "$__input"
 }
 
@@ -181,7 +154,8 @@ validate_github_token() {
 }
 
 # ============================================================
-# Banner + Step 0 header
+# Banner + Step 0 header — printed here by the launcher so the
+# main script can skip them entirely when pre-validated.
 # ============================================================
 echo -e "${CYAN}${BOLD}"
 echo "  ██████╗██╗   ██╗██████╗ ███████╗██████╗"
@@ -242,17 +216,16 @@ done
 # Stream and execute the private installer script.
 #
 # FIX: macOS ships with bash 3.2, which does not support &>>
-# (append stdout+stderr) or &> (redirect stdout+stderr) — these
-# are bash 4+ features. We handle this in priority order:
+# (append stdout+stderr) or &> (redirect stdout+stderr).
+# We handle this in priority order:
 #
 #   1. Use Homebrew bash 4/5 if available  (cleanest)
-#   2. Download to a temp file, patch &>> / &> with sed/perl,
+#   2. Download to a temp file, patch &>> / &> with sed,
 #      then run with /bin/bash              (safe fallback)
 #
 # CS_TOKEN_PREVALIDATED=1 tells the main script to skip its
 # own Step 0 block so the banner isn't printed twice.
-# The token is passed via env var and scrubbed immediately
-# after the install subprocess exits.
+# Token is passed via env var and scrubbed immediately after.
 # ============================================================
 export CS_GITHUB_TOKEN="$_RAW_TOKEN"
 export CS_TOKEN_PREVALIDATED="1"
@@ -274,7 +247,6 @@ else
     INSTALL_TMP=$(mktemp /tmp/.cs_install_XXXXXX.sh)
     chmod 700 "$INSTALL_TMP"
 
-    # Download the private script
     if ! curl -fsSL \
             --tlsv1.2 \
             -H "Authorization: Bearer $CS_GITHUB_TOKEN" \
@@ -288,7 +260,6 @@ else
     # Patch bash 4+ redirect operators to bash 3.2 equivalents:
     #   &>> FILE  →  >> FILE 2>&1
     #   &>  FILE  →  >  FILE 2>&1
-    # We use a temp swap file so we don't read and write the same file.
     PATCH_TMP=$(mktemp /tmp/.cs_patch_XXXXXX.sh)
     chmod 700 "$PATCH_TMP"
 
