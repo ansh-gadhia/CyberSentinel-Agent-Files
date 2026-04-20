@@ -12,6 +12,44 @@ PRIVATE_SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/AGENTS
 SELF_URL="https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-Files/main/CyberSentinel-macOS-Silicon-Launcher.sh"
 
 # ============================================================
+# Resolve bash 4+ for compatibility with &>> and other
+# bash 4+ features used in the private installer script.
+# macOS ships with bash 3.2 (GPL). Homebrew installs bash 5
+# at /opt/homebrew/bin/bash (Apple Silicon) or
+# /usr/local/bin/bash (Intel under Rosetta).
+# ============================================================
+BASH4=""
+for _candidate in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [ -x "$_candidate" ]; then
+        _ver=$("$_candidate" --version 2>/dev/null | awk 'NR==1{print $4}' | cut -d. -f1)
+        if [ "${_ver:-0}" -ge 4 ] 2>/dev/null; then
+            BASH4="$_candidate"
+            break
+        fi
+    fi
+done
+
+# If no bash 4+ found, we'll use /bin/bash and patch &>> on the fly
+# by pre-processing the streamed script through sed before piping to bash.
+# &>> FILE   →   >> FILE 2>&1
+# &>  FILE   →   > FILE 2>&1
+patch_bash4_syntax() {
+    sed \
+        -e 's/&>>[[:space:]]*/\>\>__SEDTMP__ 2>\&1 #/g' \
+        -e 's/__SEDTMP__//g' \
+        -e 's/&>[[:space:]]*/\>__SEDTMP__ 2>\&1 #/g' \
+        -e 's/__SEDTMP__//g'
+}
+# Cleaner approach — simple stream substitution without temp markers:
+patch_bash4_syntax() {
+    perl -pe '
+        s/([^2])\&>>/\1>>__P__/g;
+        s/>>__P__\s*(\S+)/>> $1 2>>\&1/g;
+        s/([^2])\&>\s*(\S+)/\1> $2 2>\&1/g;
+    ' 2>/dev/null || cat   # fallback: pass through unchanged if perl absent
+}
+
+# ============================================================
 # TTY guard — re-exec with a real terminal if stdin is a pipe.
 # Triggered when the user runs: curl ... | sudo bash
 # Downloads itself to /tmp (no /dev/shm on macOS), re-runs
@@ -49,8 +87,8 @@ error()   { echo -e "  ${RED}✘ ${1}${NC}" >&2; }
 # ============================================================
 cleanup() {
     unset CS_GITHUB_TOKEN CS_TOKEN_PREVALIDATED _RAW_TOKEN
-    # Wipe launcher temp file if it still exists
     [ -n "${SELF_TMP:-}" ] && rm -f "$SELF_TMP"
+    [ -n "${INSTALL_TMP:-}" ] && rm -f "$INSTALL_TMP"
 }
 trap cleanup EXIT
 
@@ -64,9 +102,6 @@ fi
 
 # ============================================================
 # macOS Apple Silicon architecture guard
-# Prevents accidental execution on Intel machines.
-# Note: Rosetta 2 may report x86_64 even on Apple Silicon if
-# bash is running under Rosetta. We also check `sysctl` to be safe.
 # ============================================================
 ARCH=$(uname -m)
 IS_ROSETTA=$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)
@@ -87,8 +122,6 @@ fi
 
 # ============================================================
 # macOS version check — require 11.0 (Big Sur) or later
-# Apple Silicon Macs ship with Big Sur or newer; anything older
-# is not a valid configuration for ARM hardware.
 # ============================================================
 OS_VER=$(sw_vers -productVersion 2>/dev/null || echo "0.0")
 OS_MAJOR=$(echo "$OS_VER" | cut -d. -f1)
@@ -105,7 +138,10 @@ fi
 read_masked() {
     local __var="$1" __prompt="$2" __input="" __char=""
     printf "%s" "$__prompt"
-    stty -echo -icanon min 1 time 0
+    # Save and set terminal settings
+    local _old_stty
+    _old_stty=$(stty -g 2>/dev/null)
+    stty -echo -icanon min 1 time 0 2>/dev/null
     while IFS= read -r -d '' -n1 __char 2>/dev/null; do
         [[ "$__char" == $'\n' || "$__char" == $'\r' || -z "$__char" ]] && break
         if [[ "$__char" == $'\x7f' || "$__char" == $'\x08' ]]; then
@@ -114,7 +150,13 @@ read_masked() {
             __input+="$__char"; printf '*'
         fi
     done
-    stty sane; echo
+    # Restore terminal settings precisely — avoids "Interrupted system call" on stty sane
+    if [ -n "$_old_stty" ]; then
+        stty "$_old_stty" 2>/dev/null
+    else
+        stty sane 2>/dev/null
+    fi
+    echo
     printf -v "$__var" '%s' "$__input"
 }
 
@@ -139,8 +181,7 @@ validate_github_token() {
 }
 
 # ============================================================
-# Banner + Step 0 header — printed here by the launcher so the
-# main script can skip them entirely when pre-validated.
+# Banner + Step 0 header
 # ============================================================
 echo -e "${CYAN}${BOLD}"
 echo "  ██████╗██╗   ██╗██████╗ ███████╗██████╗"
@@ -198,21 +239,72 @@ while [ $attempt -lt $MAX_ATTEMPTS ]; do
 done
 
 # ============================================================
-# Pass validated token to the main installer and stream it.
-# CS_TOKEN_PREVALIDATED=1 suppresses the Step 0 block in the
-# main script — no banner duplication, one seamless flow.
-# Token is passed via environment variable (not a CLI arg)
-# and scrubbed from env immediately after the pipe completes.
+# Stream and execute the private installer script.
+#
+# FIX: macOS ships with bash 3.2, which does not support &>>
+# (append stdout+stderr) or &> (redirect stdout+stderr) — these
+# are bash 4+ features. We handle this in priority order:
+#
+#   1. Use Homebrew bash 4/5 if available  (cleanest)
+#   2. Download to a temp file, patch &>> / &> with sed/perl,
+#      then run with /bin/bash              (safe fallback)
+#
+# CS_TOKEN_PREVALIDATED=1 tells the main script to skip its
+# own Step 0 block so the banner isn't printed twice.
+# The token is passed via env var and scrubbed immediately
+# after the install subprocess exits.
 # ============================================================
 export CS_GITHUB_TOKEN="$_RAW_TOKEN"
 export CS_TOKEN_PREVALIDATED="1"
 unset _RAW_TOKEN
 
-bash <(curl -fsSL \
-    --tlsv1.2 \
-    -H "Authorization: Bearer $CS_GITHUB_TOKEN" \
-    "$PRIVATE_SCRIPT_URL")
+if [ -n "$BASH4" ]; then
+    # ── Path 1: bash 4+ found — stream directly ──────────────
+    "$BASH4" <(curl -fsSL \
+        --tlsv1.2 \
+        -H "Authorization: Bearer $CS_GITHUB_TOKEN" \
+        "$PRIVATE_SCRIPT_URL")
+    INSTALL_EXIT=$?
+else
+    # ── Path 2: Only bash 3.2 available — download, patch, run ─
+    echo -e "  ${YELLOW}ℹ bash 4+ not found; applying bash 3.2 compatibility patch.${NC}"
+    echo -e "  ${YELLOW}  Install Homebrew bash for a cleaner experience: brew install bash${NC}"
+    echo ""
 
-INSTALL_EXIT=$?
+    INSTALL_TMP=$(mktemp /tmp/.cs_install_XXXXXX.sh)
+    chmod 700 "$INSTALL_TMP"
+
+    # Download the private script
+    if ! curl -fsSL \
+            --tlsv1.2 \
+            -H "Authorization: Bearer $CS_GITHUB_TOKEN" \
+            "$PRIVATE_SCRIPT_URL" \
+            -o "$INSTALL_TMP"; then
+        error "Failed to download the installer script."
+        unset CS_GITHUB_TOKEN CS_TOKEN_PREVALIDATED
+        exit 1
+    fi
+
+    # Patch bash 4+ redirect operators to bash 3.2 equivalents:
+    #   &>> FILE  →  >> FILE 2>&1
+    #   &>  FILE  →  >  FILE 2>&1
+    # We use a temp swap file so we don't read and write the same file.
+    PATCH_TMP=$(mktemp /tmp/.cs_patch_XXXXXX.sh)
+    chmod 700 "$PATCH_TMP"
+
+    sed \
+        -e 's/&>>[[:space:]]*\([^[:space:]&|;)]*\)/>> \1 2>\&1/g' \
+        -e 's/&>[[:space:]]*\([^[:space:]&|;)]*\)/> \1 2>\&1/g' \
+        "$INSTALL_TMP" > "$PATCH_TMP"
+
+    mv "$PATCH_TMP" "$INSTALL_TMP"
+
+    /bin/bash "$INSTALL_TMP"
+    INSTALL_EXIT=$?
+
+    rm -f "$INSTALL_TMP"
+    unset INSTALL_TMP
+fi
+
 unset CS_GITHUB_TOKEN CS_TOKEN_PREVALIDATED
 exit $INSTALL_EXIT
