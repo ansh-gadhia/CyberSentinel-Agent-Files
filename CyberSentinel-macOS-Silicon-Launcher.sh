@@ -43,10 +43,9 @@ if [ ! -t 0 ]; then
         rm -f "$SELF_TMP"
         exit 1
     fi
-    bash "$SELF_TMP" < /dev/tty
-    EXIT_CODE=$?
-    rm -f "$SELF_TMP"
-    exit $EXIT_CODE
+    exec bash "$SELF_TMP" < /dev/tty
+    # exec replaces the process; lines below are never reached,
+    # but the cleanup trap on the child will remove SELF_TMP.
 fi
 
 # ============================================================
@@ -113,23 +112,43 @@ if [ "$OS_MAJOR" -lt 11 ]; then
 fi
 
 # ============================================================
-# Masked token input — same logic as Intel launcher.
-# The TTY guard above ensures we always have a real terminal
-# by the time read_masked is called, so stty sane is safe.
+# Masked token input
+#
+# Fix: Replaced stty -icanon / read -d '' with a plain
+# `read -rs` loop. The -s flag suppresses echo natively
+# inside bash without touching stty line-discipline settings,
+# which avoids "stty: tcsetattr: Interrupted system call"
+# when the script is re-exec'd with stdin redirected from
+# /dev/tty (the controlling terminal's fd is inherited but
+# stty can't reset the old pipe's attributes).
+#
+# Backspace (0x7f / 0x08) is handled manually so the user
+# still sees the asterisk-mask shrink as expected.
 # ============================================================
 read_masked() {
     local __var="$1" __prompt="$2" __input="" __char=""
     printf "%s" "$__prompt"
-    stty -echo -icanon min 1 time 0
-    while IFS= read -r -d '' -n1 __char 2>/dev/null; do
-        [[ "$__char" == $'\n' || "$__char" == $'\r' || -z "$__char" ]] && break
+    # Read one character at a time with echo suppressed (-s).
+    # -r: no backslash interpretation. -n1: one char per call.
+    # Looping until Enter (empty char from -n1 on newline).
+    while IFS= read -rs -n1 __char; do
+        # Enter key produces an empty string from read -n1
+        if [[ -z "$__char" ]]; then
+            break
+        fi
+        # Handle Backspace (DEL 0x7f) and BS (0x08)
         if [[ "$__char" == $'\x7f' || "$__char" == $'\x08' ]]; then
-            [ ${#__input} -gt 0 ] && { __input="${__input%?}"; printf '\b \b'; }
+            if [ ${#__input} -gt 0 ]; then
+                __input="${__input%?}"
+                # Move cursor back, overwrite asterisk with space, move back again
+                printf '\b \b'
+            fi
         else
-            __input+="$__char"; printf '*'
+            __input+="$__char"
+            printf '*'
         fi
     done
-    stty sane; echo
+    echo  # newline after the masked input
     printf -v "$__var" '%s' "$__input"
 }
 
