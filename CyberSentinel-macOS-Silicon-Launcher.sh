@@ -35,6 +35,8 @@ done
 # Downloads itself to /tmp (no /dev/shm on macOS), re-runs
 # with /dev/tty as stdin/stdout/stderr so tcsetattr() has a
 # real controlling terminal across the sudo transition.
+# This makes fd 0 be the tty — so plain `stty` (no redirection)
+# works correctly.
 # ============================================================
 if [ ! -t 0 ]; then
     SELF_TMP=$(mktemp /tmp/.cs_launcher_XXXXXX)
@@ -44,9 +46,6 @@ if [ ! -t 0 ]; then
         rm -f "$SELF_TMP"
         exit 1
     fi
-    # Re-exec with full tty attachment: stdin, stdout AND stderr
-    # from /dev/tty so bash's read and stty have a real terminal
-    # to operate on after the sudo/pipe transition.
     exec bash "$SELF_TMP" </dev/tty >/dev/tty 2>/dev/tty
     # exec replaces the process; lines below are never reached,
     # but the cleanup trap on the child will remove SELF_TMP.
@@ -71,8 +70,9 @@ error()   { echo -e "  ${RED}✘ ${1}${NC}" >&2; }
 cleanup() {
     unset CS_GITHUB_TOKEN CS_TOKEN_PREVALIDATED _RAW_TOKEN
     # Make sure the terminal is restored to echo mode no matter
-    # how we exit (Ctrl-C mid-input, error, etc.)
-    stty echo </dev/tty 2>/dev/null || true
+    # how we exit (Ctrl-C mid-input, error, etc.). Operate on
+    # current stdin (the tty) — not via /dev/tty redirection.
+    stty echo 2>/dev/null || true
     [ -n "${SELF_TMP:-}" ]    && rm -f "$SELF_TMP"
     [ -n "${INSTALL_TMP:-}" ] && rm -f "$INSTALL_TMP"
 }
@@ -121,67 +121,62 @@ fi
 # ============================================================
 # Masked token input
 #
-# FIX: Previous version used `read -rs` which calls tcsetattr()
-# internally. After a `curl | sudo bash` pipeline followed by
-# an exec re-attach to /dev/tty, that tcsetattr() call can be
-# interrupted (EINTR) producing:
+# FIX HISTORY:
+#   v1: `read -rs` → EINTR on `tcsetattr: Interrupted system call`
+#       after curl|sudo bash re-exec.
+#   v2: `stty -echo </dev/tty` — </dev/tty opens a FRESH fd, and
+#       tcsetattr on that fd didn't affect the tty that bash's
+#       `read` reads from. Result: chars appeared BOTH as the
+#       real char (terminal default echo) AND as '*' (our manual
+#       print). e.g. "ansh" → "a*n*s*h*".
+#   v3 (THIS VERSION): After the launcher's
+#       `exec bash ... </dev/tty >/dev/tty 2>/dev/tty`, fd 0 IS
+#       the tty. So `stty -echo` with NO redirection operates
+#       on fd 0 — the same fd that `read -r -n1` reads from.
+#       One fd, one tcsetattr, echo actually gets disabled.
 #
-#     read: error setting terminal attributes: Interrupted system call
-#
-# New approach:
-#   1. Use `stty -echo` directly on /dev/tty (external binary,
-#      gets a fresh tty handle — not subject to bash's internal
-#      fd confusion).
-#   2. Use `read -r -n1` WITHOUT -s (we handled echo ourselves).
-#   3. Retry the read loop on transient failures.
-#   4. Always restore terminal via trap, even on Ctrl-C.
+#   Also: removed `|| true` on the critical stty -echo call so
+#   if it genuinely fails we fall back to visible input rather
+#   than silently producing double-echoed garbage.
 # ============================================================
 read_masked() {
     local __var="$1" __prompt="$2" __input="" __char=""
     local __old_stty=""
 
-    # Save current terminal settings so we can restore them
-    __old_stty=$(stty -g </dev/tty 2>/dev/null) || __old_stty=""
+    # Save current tty settings. Operate on fd 0 (current stdin),
+    # which after the exec above IS the controlling terminal.
+    __old_stty=$(stty -g 2>/dev/null) || __old_stty=""
 
-    # Restore-on-exit helper (local to this function's scope)
     _restore_tty() {
         if [ -n "$__old_stty" ]; then
-            stty "$__old_stty" </dev/tty 2>/dev/null || \
-                stty echo </dev/tty 2>/dev/null || true
-        else
-            stty echo </dev/tty 2>/dev/null || true
+            stty "$__old_stty" 2>/dev/null
         fi
+        # Belt-and-suspenders: always force echo back on
+        stty echo 2>/dev/null
     }
 
-    # Trap SIGINT so Ctrl-C doesn't leave the tty in -echo mode.
-    trap '_restore_tty; trap - INT; kill -INT $$' INT
+    # SIGINT handler: restore tty and exit cleanly
+    trap '_restore_tty; trap - INT; exit 130' INT
 
-    # Disable echo via stty directly (not via read -s)
-    stty -echo </dev/tty 2>/dev/null || true
+    # Disable echo on the current tty. If this fails for any
+    # reason, fall back to plain visible input — better than
+    # double-echoed garbage.
+    if ! stty -echo 2>/dev/null; then
+        _restore_tty
+        trap - INT
+        echo -e "${YELLOW}  ⚠ Cannot disable terminal echo — input will be visible.${NC}" >&2
+        printf "%s" "$__prompt"
+        IFS= read -r __input
+        printf -v "$__var" '%s' "$__input"
+        return 0
+    fi
 
     printf "%s" "$__prompt"
 
-    # Read one char at a time. Retry on transient read failures
-    # (rare EINTR situations after sudo/pipe transitions).
-    while :; do
-        __char=""
-        local __attempts=0
-        local __read_ok=0
-        while [ $__attempts -lt 5 ]; do
-            if IFS= read -r -n1 __char </dev/tty; then
-                __read_ok=1
-                break
-            fi
-            __attempts=$((__attempts + 1))
-            sleep 0.05
-        done
-
-        # If we still can't read, bail cleanly
-        if [ $__read_ok -eq 0 ]; then
-            break
-        fi
-
-        # Enter key → empty __char from -n1 on newline
+    # Read one char at a time. No -s (we handled echo via stty).
+    # No </dev/tty redirection (fd 0 is already the tty).
+    while IFS= read -r -n1 __char; do
+        # Enter key → -n1 returns empty string on newline
         if [[ -z "$__char" ]]; then
             break
         fi
@@ -198,7 +193,6 @@ read_masked() {
         fi
     done
 
-    # Restore terminal + remove trap
     _restore_tty
     trap - INT
 
