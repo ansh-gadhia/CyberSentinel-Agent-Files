@@ -33,7 +33,8 @@ done
 # TTY guard — re-exec with a real terminal if stdin is a pipe.
 # Triggered when the user runs: curl ... | sudo bash
 # Downloads itself to /tmp (no /dev/shm on macOS), re-runs
-# with /dev/tty as stdin, then wipes the temp file.
+# with /dev/tty as stdin/stdout/stderr so tcsetattr() has a
+# real controlling terminal across the sudo transition.
 # ============================================================
 if [ ! -t 0 ]; then
     SELF_TMP=$(mktemp /tmp/.cs_launcher_XXXXXX)
@@ -43,7 +44,10 @@ if [ ! -t 0 ]; then
         rm -f "$SELF_TMP"
         exit 1
     fi
-    exec bash "$SELF_TMP" < /dev/tty
+    # Re-exec with full tty attachment: stdin, stdout AND stderr
+    # from /dev/tty so bash's read and stty have a real terminal
+    # to operate on after the sudo/pipe transition.
+    exec bash "$SELF_TMP" </dev/tty >/dev/tty 2>/dev/tty
     # exec replaces the process; lines below are never reached,
     # but the cleanup trap on the child will remove SELF_TMP.
 fi
@@ -66,6 +70,9 @@ error()   { echo -e "  ${RED}✘ ${1}${NC}" >&2; }
 # ============================================================
 cleanup() {
     unset CS_GITHUB_TOKEN CS_TOKEN_PREVALIDATED _RAW_TOKEN
+    # Make sure the terminal is restored to echo mode no matter
+    # how we exit (Ctrl-C mid-input, error, etc.)
+    stty echo </dev/tty 2>/dev/null || true
     [ -n "${SELF_TMP:-}" ]    && rm -f "$SELF_TMP"
     [ -n "${INSTALL_TMP:-}" ] && rm -f "$INSTALL_TMP"
 }
@@ -114,33 +121,75 @@ fi
 # ============================================================
 # Masked token input
 #
-# Fix: Replaced stty -icanon / read -d '' with a plain
-# `read -rs` loop. The -s flag suppresses echo natively
-# inside bash without touching stty line-discipline settings,
-# which avoids "stty: tcsetattr: Interrupted system call"
-# when the script is re-exec'd with stdin redirected from
-# /dev/tty (the controlling terminal's fd is inherited but
-# stty can't reset the old pipe's attributes).
+# FIX: Previous version used `read -rs` which calls tcsetattr()
+# internally. After a `curl | sudo bash` pipeline followed by
+# an exec re-attach to /dev/tty, that tcsetattr() call can be
+# interrupted (EINTR) producing:
 #
-# Backspace (0x7f / 0x08) is handled manually so the user
-# still sees the asterisk-mask shrink as expected.
+#     read: error setting terminal attributes: Interrupted system call
+#
+# New approach:
+#   1. Use `stty -echo` directly on /dev/tty (external binary,
+#      gets a fresh tty handle — not subject to bash's internal
+#      fd confusion).
+#   2. Use `read -r -n1` WITHOUT -s (we handled echo ourselves).
+#   3. Retry the read loop on transient failures.
+#   4. Always restore terminal via trap, even on Ctrl-C.
 # ============================================================
 read_masked() {
     local __var="$1" __prompt="$2" __input="" __char=""
+    local __old_stty=""
+
+    # Save current terminal settings so we can restore them
+    __old_stty=$(stty -g </dev/tty 2>/dev/null) || __old_stty=""
+
+    # Restore-on-exit helper (local to this function's scope)
+    _restore_tty() {
+        if [ -n "$__old_stty" ]; then
+            stty "$__old_stty" </dev/tty 2>/dev/null || \
+                stty echo </dev/tty 2>/dev/null || true
+        else
+            stty echo </dev/tty 2>/dev/null || true
+        fi
+    }
+
+    # Trap SIGINT so Ctrl-C doesn't leave the tty in -echo mode.
+    trap '_restore_tty; trap - INT; kill -INT $$' INT
+
+    # Disable echo via stty directly (not via read -s)
+    stty -echo </dev/tty 2>/dev/null || true
+
     printf "%s" "$__prompt"
-    # Read one character at a time with echo suppressed (-s).
-    # -r: no backslash interpretation. -n1: one char per call.
-    # Looping until Enter (empty char from -n1 on newline).
-    while IFS= read -rs -n1 __char; do
-        # Enter key produces an empty string from read -n1
+
+    # Read one char at a time. Retry on transient read failures
+    # (rare EINTR situations after sudo/pipe transitions).
+    while :; do
+        __char=""
+        local __attempts=0
+        local __read_ok=0
+        while [ $__attempts -lt 5 ]; do
+            if IFS= read -r -n1 __char </dev/tty; then
+                __read_ok=1
+                break
+            fi
+            __attempts=$((__attempts + 1))
+            sleep 0.05
+        done
+
+        # If we still can't read, bail cleanly
+        if [ $__read_ok -eq 0 ]; then
+            break
+        fi
+
+        # Enter key → empty __char from -n1 on newline
         if [[ -z "$__char" ]]; then
             break
         fi
-        # Handle Backspace (DEL 0x7f) and BS (0x08)
+
+        # Backspace handling (DEL 0x7f or BS 0x08)
         if [[ "$__char" == $'\x7f' || "$__char" == $'\x08' ]]; then
             if [ ${#__input} -gt 0 ]; then
                 __input="${__input%?}"
-                # Move cursor back, overwrite asterisk with space, move back again
                 printf '\b \b'
             fi
         else
@@ -148,7 +197,12 @@ read_masked() {
             printf '*'
         fi
     done
-    echo  # newline after the masked input
+
+    # Restore terminal + remove trap
+    _restore_tty
+    trap - INT
+
+    echo  # newline after masked input
     printf -v "$__var" '%s' "$__input"
 }
 
@@ -234,7 +288,7 @@ done
 # ============================================================
 # Stream and execute the private installer script.
 #
-# FIX: macOS ships with bash 3.2, which does not support &>>
+# macOS ships with bash 3.2, which does not support &>>
 # (append stdout+stderr) or &> (redirect stdout+stderr).
 # We handle this in priority order:
 #
