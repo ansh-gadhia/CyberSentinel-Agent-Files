@@ -49,6 +49,8 @@ error()   { echo -e "  ${RED}✘ ${1}${NC}" >&2; }
 # Cleanup trap — wipe token from memory on any exit
 # ============================================================
 cleanup() {
+    # Restore terminal to sane state in case we exit mid-input
+    stty sane 2>/dev/null || true
     unset CS_GITHUB_TOKEN CS_TOKEN_PREVALIDATED _RAW_TOKEN
 }
 trap cleanup EXIT
@@ -63,32 +65,61 @@ fi
 
 # ============================================================
 # Masked token input
+# FIX: All stty and read calls now explicitly use /dev/tty so
+# they always operate on the real terminal, regardless of how
+# stdin was set up by the TTY re-exec dance above.
 # ============================================================
 read_masked() {
     local __var="$1" __prompt="$2" __input="" __char=""
-    printf "%s" "$__prompt"
-    stty -echo -icanon min 1 time 0
-    while IFS= read -r -d '' -n1 __char 2>/dev/null; do
+    printf "%s" "$__prompt" > /dev/tty
+    stty -echo -icanon min 1 time 0 < /dev/tty 2>/dev/null || true
+    while IFS= read -r -d '' -n1 __char < /dev/tty 2>/dev/null; do
         [[ "$__char" == $'\n' || "$__char" == $'\r' || -z "$__char" ]] && break
         if [[ "$__char" == $'\x7f' || "$__char" == $'\x08' ]]; then
-            [ ${#__input} -gt 0 ] && { __input="${__input%?}"; printf '\b \b'; }
+            [ ${#__input} -gt 0 ] && { __input="${__input%?}"; printf '\b \b' > /dev/tty; }
         else
-            __input+="$__char"; printf '*'
+            __input+="$__char"; printf '*' > /dev/tty
         fi
     done
-    stty sane; echo
+    stty sane < /dev/tty 2>/dev/null || true
+    echo > /dev/tty
     printf -v "$__var" '%s' "$__input"
 }
 
 validate_github_token() {
     local token="$1" http_code
+
+    # Guard: empty token
+    if [ -z "$token" ]; then
+        return 1
+    fi
+
     http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+        --max-time 10 \
         -H "Authorization: Bearer $token" \
-        "https://api.github.com/user")
-    [ "$http_code" -ne 200 ] && return 1
+        "https://api.github.com/user" 2>/dev/null)
+
+    # Guard: curl failed or returned empty
+    if [ -z "$http_code" ] || ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
+        echo -e "\n  ${YELLOW}⚠ Network error contacting GitHub API. Check your connection.${NC}"
+        return 1
+    fi
+
+    if [ "$http_code" -ne 200 ]; then
+        return 1
+    fi
+
     http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+        --max-time 10 \
         -H "Authorization: Bearer $token" \
-        "https://api.github.com/repos/$GITHUB_REPO")
+        "https://api.github.com/repos/$GITHUB_REPO" 2>/dev/null)
+
+    # Guard: curl failed or returned empty
+    if [ -z "$http_code" ] || ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
+        echo -e "\n  ${YELLOW}⚠ Network error checking repo access. Check your connection.${NC}"
+        return 1
+    fi
+
     if [ "$http_code" -eq 200 ]; then
         return 0
     elif [ "$http_code" -eq 404 ] || [ "$http_code" -eq 403 ]; then
@@ -130,6 +161,14 @@ while [ $attempt -lt $MAX_ATTEMPTS ]; do
 
     read_masked _RAW_TOKEN "  Enter GitHub Personal Access Token: "
 
+    # Guard: user submitted empty input
+    if [ -z "$_RAW_TOKEN" ]; then
+        error "No token entered (attempt $attempt/$MAX_ATTEMPTS)."
+        [ $attempt -eq $MAX_ATTEMPTS ] && { error "Too many failed attempts. Exiting."; exit 1; }
+        echo -e "  ${YELLOW}Please try again.${NC}"
+        continue
+    fi
+
     if [ ${#_RAW_TOKEN} -gt 8 ]; then
         masked="${_RAW_TOKEN:0:4}$(printf '%0.s*' $(seq 1 $((${#_RAW_TOKEN} - 8))))${_RAW_TOKEN: -4}"
     else
@@ -137,7 +176,7 @@ while [ $attempt -lt $MAX_ATTEMPTS ]; do
     fi
     echo -e "  Token entered: ${YELLOW}${masked}${NC}"
 
-    printf "  Validating token..."
+    printf "  Validating token...\n"
     validate_github_token "$_RAW_TOKEN"
     val_result=$?
 
