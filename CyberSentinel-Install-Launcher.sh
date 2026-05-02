@@ -2,9 +2,6 @@
 
 # ============================================================
 # CyberSentinel — Public Launcher (silent passthrough)
-# Validates the GitHub token, then streams the private
-# installer directly into bash. The user sees one seamless
-# flow — no launcher UI, no duplicate banners, no step headers.
 # ============================================================
 
 GITHUB_REPO="cybersentinel-06/CyberSentinel-SIEM"
@@ -13,10 +10,6 @@ SELF_URL="https://raw.githubusercontent.com/ansh-gadhia/CyberSentinel-Agent-File
 
 # ============================================================
 # TTY guard — re-exec with a real terminal if stdin is a pipe.
-# Happens when the user runs: curl ... | sudo bash
-# Downloads itself to tmpfs, re-runs with /dev/tty as stdin,
-# then wipes the temp file. Second run hits a real TTY and
-# falls through to normal execution.
 # ============================================================
 if [ ! -t 0 ]; then
     SELF_TMP=$(mktemp /dev/shm/.cs_launcher_XXXXXX)
@@ -46,10 +39,9 @@ success() { echo -e "  ${GREEN}✔ ${1}${NC}"; }
 error()   { echo -e "  ${RED}✘ ${1}${NC}" >&2; }
 
 # ============================================================
-# Cleanup trap — wipe token from memory on any exit
+# Cleanup trap
 # ============================================================
 cleanup() {
-    # Restore terminal to sane state in case we exit mid-input
     stty sane 2>/dev/null || true
     unset CS_GITHUB_TOKEN CS_TOKEN_PREVALIDATED _RAW_TOKEN
 }
@@ -64,32 +56,21 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # ============================================================
-# Masked token input
-# FIX: All stty and read calls now explicitly use /dev/tty so
-# they always operate on the real terminal, regardless of how
-# stdin was set up by the TTY re-exec dance above.
+# Masked token input — uses bash's built-in "read -s" which
+# is rock-solid across all terminal types and re-exec setups.
+# We redirect both prompt and read explicitly from /dev/tty.
 # ============================================================
 read_masked() {
-    local __var="$1" __prompt="$2" __input="" __char=""
-    printf "%s" "$__prompt" > /dev/tty
-    stty -echo -icanon min 1 time 0 < /dev/tty 2>/dev/null || true
-    while IFS= read -r -d '' -n1 __char < /dev/tty 2>/dev/null; do
-        [[ "$__char" == $'\n' || "$__char" == $'\r' || -z "$__char" ]] && break
-        if [[ "$__char" == $'\x7f' || "$__char" == $'\x08' ]]; then
-            [ ${#__input} -gt 0 ] && { __input="${__input%?}"; printf '\b \b' > /dev/tty; }
-        else
-            __input+="$__char"; printf '*' > /dev/tty
-        fi
-    done
-    stty sane < /dev/tty 2>/dev/null || true
-    echo > /dev/tty
+    local __var="$1" __prompt="$2" __input=""
+    printf "%s" "$__prompt" >/dev/tty
+    IFS= read -rs __input </dev/tty
+    echo >/dev/tty
     printf -v "$__var" '%s' "$__input"
 }
 
 validate_github_token() {
     local token="$1" http_code
 
-    # Guard: empty token
     if [ -z "$token" ]; then
         return 1
     fi
@@ -99,9 +80,8 @@ validate_github_token() {
         -H "Authorization: Bearer $token" \
         "https://api.github.com/user" 2>/dev/null)
 
-    # Guard: curl failed or returned empty
     if [ -z "$http_code" ] || ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
-        echo -e "\n  ${YELLOW}⚠ Network error contacting GitHub API. Check your connection.${NC}"
+        echo -e "  ${YELLOW}⚠ Network error contacting GitHub API. Check your connection.${NC}"
         return 1
     fi
 
@@ -114,16 +94,15 @@ validate_github_token() {
         -H "Authorization: Bearer $token" \
         "https://api.github.com/repos/$GITHUB_REPO" 2>/dev/null)
 
-    # Guard: curl failed or returned empty
     if [ -z "$http_code" ] || ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
-        echo -e "\n  ${YELLOW}⚠ Network error checking repo access. Check your connection.${NC}"
+        echo -e "  ${YELLOW}⚠ Network error checking repo access. Check your connection.${NC}"
         return 1
     fi
 
     if [ "$http_code" -eq 200 ]; then
         return 0
     elif [ "$http_code" -eq 404 ] || [ "$http_code" -eq 403 ]; then
-        echo -e "\n  ${YELLOW}⚠ Token valid but cannot access repo '${GITHUB_REPO}' (HTTP $http_code).${NC}"
+        echo -e "  ${YELLOW}⚠ Token valid but cannot access repo '${GITHUB_REPO}' (HTTP $http_code).${NC}"
         echo -e "  ${YELLOW}  Ensure the token has 'repo' or 'contents:read' scope.${NC}"
         return 2
     else
@@ -132,9 +111,7 @@ validate_github_token() {
 }
 
 # ============================================================
-# Banner + Step 0 header — printed here by the launcher so
-# the main script can skip them entirely when pre-validated.
-# Result: user sees one unbroken flow, identical to before.
+# Banner
 # ============================================================
 echo -e "${CYAN}${BOLD}"
 echo "  ██████╗██╗   ██╗██████╗ ███████╗██████╗"
@@ -161,7 +138,6 @@ while [ $attempt -lt $MAX_ATTEMPTS ]; do
 
     read_masked _RAW_TOKEN "  Enter GitHub Personal Access Token: "
 
-    # Guard: user submitted empty input
     if [ -z "$_RAW_TOKEN" ]; then
         error "No token entered (attempt $attempt/$MAX_ATTEMPTS)."
         [ $attempt -eq $MAX_ATTEMPTS ] && { error "Too many failed attempts. Exiting."; exit 1; }
@@ -197,10 +173,7 @@ while [ $attempt -lt $MAX_ATTEMPTS ]; do
 done
 
 # ============================================================
-# Pass token to main script and stream it into bash silently.
-# CS_TOKEN_PREVALIDATED=1 suppresses the entire Step 0 block
-# in the main script (banner, header, token prompt, success msg)
-# so nothing is repeated and the flow looks completely native.
+# Stream and execute private installer
 # ============================================================
 export CS_GITHUB_TOKEN="$_RAW_TOKEN"
 export CS_TOKEN_PREVALIDATED="1"
