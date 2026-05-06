@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================
-# CyberSentinel Uninstaller Script for Ubuntu
+# CyberSentinel Uninstaller Script for Ubuntu  (PATCHED)
 # ============================================================
 
 LOG_DIR="/opt/cybersentinel"
@@ -119,31 +119,41 @@ echo ""
 # ============================================================
 step "Step 1 │ Stopping CyberSentinel Agent Service"
 
-if systemctl is-active --quiet cybersentinel-agent 2>/dev/null; then
-    systemctl stop cybersentinel-agent &>>"$LOG_FILE" &
-    spinner $! "Stopping cybersentinel-agent"
-    success "cybersentinel-agent stopped."
-else
-    warn "cybersentinel-agent was not running."
+for svc in cybersentinel-agent wazuh-agent; do
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        systemctl stop "$svc" &>>"$LOG_FILE"
+        success "$svc stopped."
+    else
+        warn "$svc was not running."
+    fi
+
+    if systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+        systemctl disable "$svc" &>>"$LOG_FILE"
+        success "$svc disabled from startup."
+    fi
+done
+
+# Kill any lingering wazuh/ossec processes that block the dpkg purge
+echo -e "  ${BOLD}Checking for lingering Wazuh/OSSEC processes...${NC}"
+KILLED_ANY=false
+for proc in wazuh-agentd wazuh-execd wazuh-syscheckd wazuh-logcollector \
+            wazuh-modulesd ossec-agentd ossec-execd ossec-syscheckd \
+            ossec-logcollector; do
+    if pgrep -x "$proc" &>/dev/null; then
+        pkill -9 -x "$proc" &>>"$LOG_FILE" || true
+        success "Killed lingering process: $proc"
+        KILLED_ANY=true
+    fi
+done
+
+# Catch-all for anything else with "wazuh" in the name
+if pgrep -f wazuh &>/dev/null; then
+    pkill -9 -f wazuh &>>"$LOG_FILE" || true
+    success "Killed remaining wazuh-* processes."
+    KILLED_ANY=true
 fi
 
-if systemctl is-active --quiet wazuh-agent 2>/dev/null; then
-    systemctl stop wazuh-agent &>>"$LOG_FILE" &
-    spinner $! "Stopping wazuh-agent"
-    success "wazuh-agent stopped."
-else
-    warn "wazuh-agent was not running."
-fi
-
-if systemctl is-enabled --quiet cybersentinel-agent 2>/dev/null; then
-    systemctl disable cybersentinel-agent &>>"$LOG_FILE"
-    success "cybersentinel-agent disabled from startup."
-fi
-
-if systemctl is-enabled --quiet wazuh-agent 2>/dev/null; then
-    systemctl disable wazuh-agent &>>"$LOG_FILE"
-    success "wazuh-agent disabled from startup."
-fi
+$KILLED_ANY && sleep 2 || warn "No lingering processes found."
 
 # ============================================================
 # STEP 2 — Remove systemd service file
@@ -168,33 +178,89 @@ success "Systemd daemon reloaded."
 # ============================================================
 step "Step 3 │ Removing Wazuh Agent Package"
 
-if dpkg -l wazuh-agent &>/dev/null 2>&1; then
-    dpkg --purge wazuh-agent &>>"$LOG_FILE" &
-    spinner $! "Purging wazuh-agent package"
-    if [ $? -eq 0 ]; then
-        success "wazuh-agent package purged."
+# Check ANY dpkg state — installed, half-installed, config-files-only, etc.
+PKG_STATE=$(dpkg-query -W -f='${db:Status-Abbrev}' wazuh-agent 2>/dev/null | tr -d ' ')
+
+if [ -n "$PKG_STATE" ]; then
+    echo "  Current package state: '$PKG_STATE'" | tee -a "$LOG_FILE"
+
+    # First attempt — clean purge in foreground (real exit code, no spinner masking)
+    echo -e "  ${BOLD}Attempt 1: Standard purge...${NC}"
+    if DEBIAN_FRONTEND=noninteractive dpkg --purge wazuh-agent &>>"$LOG_FILE"; then
+        success "wazuh-agent purged cleanly."
     else
-        warn "dpkg purge encountered issues — check $LOG_FILE."
+        warn "Standard purge failed — trying with --force-all."
+
+        # Second attempt — force-all bypasses most failure conditions
+        echo -e "  ${BOLD}Attempt 2: Forced purge...${NC}"
+        DEBIAN_FRONTEND=noninteractive dpkg --purge --force-all wazuh-agent &>>"$LOG_FILE" || true
+
+        # If still present, the postrm/prerm script is the blocker — neutralise it
+        if dpkg-query -W -f='${db:Status-Abbrev}' wazuh-agent 2>/dev/null | grep -q .; then
+            warn "Package still present — neutralising maintainer scripts."
+            rm -f /var/lib/dpkg/info/wazuh-agent.postrm \
+                  /var/lib/dpkg/info/wazuh-agent.prerm \
+                  /var/lib/dpkg/info/wazuh-agent.postinst \
+                  /var/lib/dpkg/info/wazuh-agent.preinst
+
+            echo -e "  ${BOLD}Attempt 3: Forced purge after script removal...${NC}"
+            DEBIAN_FRONTEND=noninteractive dpkg --purge --force-all wazuh-agent &>>"$LOG_FILE" || true
+        fi
+
+        # Last resort — manually scrub dpkg's database entry
+        if dpkg-query -W -f='${db:Status-Abbrev}' wazuh-agent 2>/dev/null | grep -q .; then
+            warn "Package still in dpkg DB — manually clearing entries."
+            rm -f /var/lib/dpkg/info/wazuh-agent.* 2>/dev/null || true
+            # Edit the status file to remove the wazuh-agent stanza
+            if [ -f /var/lib/dpkg/status ]; then
+                cp /var/lib/dpkg/status /var/lib/dpkg/status.cybersentinel-bak
+                awk 'BEGIN{RS=""; ORS="\n\n"} !/^Package: wazuh-agent/' \
+                    /var/lib/dpkg/status > /var/lib/dpkg/status.new \
+                    && mv /var/lib/dpkg/status.new /var/lib/dpkg/status
+                success "Manually scrubbed wazuh-agent from dpkg status."
+            fi
+        fi
+    fi
+
+    # Final verification
+    if dpkg-query -W -f='${db:Status-Abbrev}' wazuh-agent 2>/dev/null | grep -q .; then
+        error "wazuh-agent could not be fully removed — manual intervention required."
+        error "Check $LOG_FILE for details."
+    else
+        success "wazuh-agent fully purged."
     fi
 else
-    warn "wazuh-agent package not found (already removed?)."
+    warn "wazuh-agent package not present."
 fi
 
 # Remove leftover ossec directories
-for DIR in /var/ossec /etc/ossec-init.conf; do
+for DIR in /var/ossec /etc/ossec-init.conf /var/log/wazuh /var/run/wazuh /run/wazuh; do
     if [ -e "$DIR" ]; then
         rm -rf "$DIR" &>>"$LOG_FILE"
         success "Removed: $DIR"
-    else
-        warn "Not found (skipping): $DIR"
     fi
 done
 
-# Remove the downloaded .deb if it was left behind
-DEB_TMP="/tmp/wazuh-agent_4.12.0-1_amd64.deb"
-if [ -f "$DEB_TMP" ]; then
-    rm -f "$DEB_TMP"
-    success "Removed leftover package: $DEB_TMP"
+# Final cleanup of any remaining dpkg metadata
+rm -f /var/lib/dpkg/info/wazuh-agent.* 2>/dev/null || true
+
+# Remove any leftover .deb files (any version)
+shopt -s nullglob
+DEB_LEFTOVERS=(/tmp/wazuh-agent_*.deb)
+shopt -u nullglob
+if [ ${#DEB_LEFTOVERS[@]} -gt 0 ]; then
+    rm -f "${DEB_LEFTOVERS[@]}"
+    success "Removed leftover package(s): ${DEB_LEFTOVERS[*]}"
+fi
+
+# Remove the wazuh user/group if they exist (created by the package)
+if id wazuh &>/dev/null; then
+    userdel wazuh &>>"$LOG_FILE" || true
+    success "Removed 'wazuh' user."
+fi
+if getent group wazuh &>/dev/null; then
+    groupdel wazuh &>>"$LOG_FILE" || true
+    success "Removed 'wazuh' group."
 fi
 
 # ============================================================
@@ -213,13 +279,16 @@ for bin in "${YARA_BINS[@]}"; do
     fi
 done
 
-# Remove YARA libraries installed by 'make install'
-for LIB_PATH in /usr/local/lib/libyara* /usr/lib/libyara*; do
-    if compgen -G "$LIB_PATH" > /dev/null 2>&1; then
-        rm -f $LIB_PATH
-        success "Removed library: $LIB_PATH"
-    fi
-done
+# Remove YARA libraries installed by 'make install' (use globbing properly)
+shopt -s nullglob
+YARA_LIBS=(/usr/local/lib/libyara* /usr/lib/libyara* /usr/lib/x86_64-linux-gnu/libyara*)
+shopt -u nullglob
+if [ ${#YARA_LIBS[@]} -gt 0 ]; then
+    for LIB in "${YARA_LIBS[@]}"; do
+        rm -f "$LIB"
+        success "Removed library: $LIB"
+    done
+fi
 
 # Remove YARA headers
 if [ -d /usr/local/include/yara ]; then
@@ -241,15 +310,20 @@ for PC_FILE in /usr/local/lib/pkgconfig/yara.pc /usr/lib/pkgconfig/yara.pc; do
     fi
 done
 
+# Remove YARA source/build dirs from the installer
+shopt -s nullglob
+YARA_SRC_DIRS=(/usr/local/bin/yara-* /tmp/yara-build /tmp/yara /tmp/v*.tar.gz)
+shopt -u nullglob
+for DIR in "${YARA_SRC_DIRS[@]}"; do
+    if [ -e "$DIR" ]; then
+        rm -rf "$DIR"
+        success "Removed: $DIR"
+    fi
+done
+
 # Update shared library cache
 ldconfig &>>"$LOG_FILE"
 success "Shared library cache updated."
-
-# Clean up any leftover build directory (in case uninstall is run after a failed install)
-if [ -d /tmp/yara-build ]; then
-    rm -rf /tmp/yara-build
-    success "Removed leftover YARA build directory."
-fi
 
 # ============================================================
 # STEP 5 — Stop & Remove Suricata
@@ -257,8 +331,7 @@ fi
 step "Step 5 │ Removing Suricata IDS"
 
 if systemctl is-active --quiet suricata 2>/dev/null; then
-    systemctl stop suricata &>>"$LOG_FILE" &
-    spinner $! "Stopping Suricata"
+    systemctl stop suricata &>>"$LOG_FILE"
     success "Suricata stopped."
 else
     warn "Suricata was not running."
@@ -269,13 +342,24 @@ if systemctl is-enabled --quiet suricata 2>/dev/null; then
     success "Suricata disabled from startup."
 fi
 
-if dpkg -l suricata &>/dev/null 2>&1; then
-    apt-get purge suricata -y &>>"$LOG_FILE" &
-    spinner $! "Purging Suricata package"
-    if [ $? -eq 0 ]; then
-        success "Suricata package purged."
+# Kill any lingering suricata processes
+if pgrep -x suricata &>/dev/null; then
+    pkill -9 -x suricata &>>"$LOG_FILE" || true
+    success "Killed lingering suricata process."
+    sleep 1
+fi
+
+if dpkg-query -W -f='${db:Status-Abbrev}' suricata 2>/dev/null | grep -q .; then
+    echo -e "  ${BOLD}Purging Suricata package...${NC}"
+    if ! DEBIAN_FRONTEND=noninteractive apt-get purge suricata -y &>>"$LOG_FILE"; then
+        warn "apt purge failed — falling back to forced dpkg purge."
+        DEBIAN_FRONTEND=noninteractive dpkg --purge --force-all suricata &>>"$LOG_FILE" || true
+    fi
+
+    if dpkg-query -W -f='${db:Status-Abbrev}' suricata 2>/dev/null | grep -q .; then
+        error "Suricata could not be fully removed — check $LOG_FILE."
     else
-        warn "Suricata purge encountered issues — check $LOG_FILE."
+        success "Suricata package purged."
     fi
 else
     warn "Suricata package not found (already removed?)."
@@ -294,30 +378,34 @@ if [ -f /tmp/emerging.rules.tar.gz ]; then
     rm -f /tmp/emerging.rules.tar.gz
     success "Removed leftover Suricata rules archive."
 fi
+if [ -d /tmp/rules ]; then
+    rm -rf /tmp/rules
+    success "Removed leftover /tmp/rules directory."
+fi
 
-# Remove Suricata PPA
-if [ -f /etc/apt/sources.list.d/oisf-ubuntu-suricata-stable-*.list ] 2>/dev/null || \
-   ls /etc/apt/sources.list.d/oisf* &>/dev/null 2>&1; then
-    add-apt-repository --remove -y ppa:oisf/suricata-stable &>>"$LOG_FILE" &
-    spinner $! "Removing Suricata PPA"
+# Remove Suricata PPA — use ls properly without the broken [ -f ] glob test
+if ls /etc/apt/sources.list.d/oisf* &>/dev/null; then
+    add-apt-repository --remove -y ppa:oisf/suricata-stable &>>"$LOG_FILE"
     success "Suricata PPA removed."
+    # Belt-and-braces: nuke any leftover list files
+    rm -f /etc/apt/sources.list.d/oisf* 2>/dev/null
 else
     warn "Suricata PPA not found (skipping)."
 fi
 
 apt-get autoremove -y &>>"$LOG_FILE" &
 spinner $! "Running apt autoremove"
-success "Unused dependencies cleaned up."
 
 apt-get update -qq &>>"$LOG_FILE" &
 spinner $! "Updating package lists"
-success "Package lists updated."
 
 # ============================================================
 # STEP 6 — Remove Active Response Scripts
 # ============================================================
 step "Step 6 │ Removing Active Response Scripts"
 
+# Note: $BIN_DIR is under /var/ossec, which Step 3 already wiped.
+# This step is a safety net for unusual cases where /var/ossec survived.
 for file in llm_query.py remove-threat.sh yara.sh; do
     TARGET="$BIN_DIR/$file"
     if [ -f "$TARGET" ]; then
@@ -352,7 +440,6 @@ fi
 step "Step 8 │ CyberSentinel Log Directory"
 
 if [[ "$REMOVE_LOGS" == "yes" ]]; then
-    # Write final log entry before deleting the directory
     echo "Uninstall completed: $(date)" >> "$LOG_FILE"
     rm -rf "$LOG_DIR"
     echo -e "  ${GREEN}✔ Removed log directory: ${LOG_DIR}${NC}"
@@ -370,19 +457,26 @@ sleep 1
 
 ERRORS=0
 
-# Wazuh/CyberSentinel agent
-if dpkg -l wazuh-agent &>/dev/null 2>&1; then
-    warn "wazuh-agent package still present."
+# Wazuh/CyberSentinel agent — check ANY dpkg state, not just installed
+if dpkg-query -W -f='${db:Status-Abbrev}' wazuh-agent 2>/dev/null | grep -q .; then
+    warn "wazuh-agent package still present in dpkg database."
     ERRORS=$((ERRORS + 1))
 else
     success "wazuh-agent package  →  removed"
 fi
 
-if systemctl list-units --all 2>/dev/null | grep -q "cybersentinel-agent"; then
-    warn "cybersentinel-agent service still visible in systemd."
+if systemctl list-unit-files 2>/dev/null | grep -q "cybersentinel-agent\|wazuh-agent"; then
+    warn "CyberSentinel/Wazuh service unit still visible in systemd."
     ERRORS=$((ERRORS + 1))
 else
     success "cybersentinel-agent service  →  removed"
+fi
+
+if [ -d /var/ossec ]; then
+    warn "/var/ossec directory still exists."
+    ERRORS=$((ERRORS + 1))
+else
+    success "/var/ossec  →  removed"
 fi
 
 # YARA
@@ -394,7 +488,7 @@ else
 fi
 
 # Suricata
-if dpkg -l suricata &>/dev/null 2>&1; then
+if dpkg-query -W -f='${db:Status-Abbrev}' suricata 2>/dev/null | grep -q .; then
     warn "suricata package still present."
     ERRORS=$((ERRORS + 1))
 else
@@ -431,5 +525,6 @@ if [ $ERRORS -eq 0 ]; then
     echo -e "  ${GREEN}${BOLD}CyberSentinel fully uninstalled. ✔${NC}"
 else
     echo -e "  ${YELLOW}${BOLD}Uninstall completed with ${ERRORS} warning(s). Check output above.${NC}"
+    echo -e "  ${YELLOW}Consider running this script once more, or check ${LOG_FILE}.${NC}"
 fi
 echo ""
